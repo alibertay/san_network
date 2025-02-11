@@ -85,7 +85,9 @@ This will start a FastAPI server for handling transactions and blockchain synchr
 
 ## Future Improvements
 ✅ Implementing staking mechanisms for validators.  
-✅ SANVM
+✅ Creating node groups
+✅ Add smart contract support
+
 
 ## Conclusion
 SAN Network is a lightweight, scalable blockchain solution focused on decentralization, security, and performance. Its innovative approach to transaction validation and consensus makes it a powerful framework for secure digital transactions.

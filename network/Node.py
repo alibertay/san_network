@@ -12,6 +12,11 @@ from blockchain.Blockchain import Blockchain
 from blockchain.Transaction import Transaction
 from blockchain.Block import Block
 
+from SANVM.VM import SANVirtualMachine
+from SANVM.Storage import Storage
+
+from utils.parser import Parser
+
 class Node:
     BLOCK_THRESHOLD_FEE = 500
 
@@ -27,9 +32,13 @@ class Node:
 
         self.last_seen_block_timestamp = 0 # last seen block's timestamp
 
+        self.storage = Storage()
+
         self.synchronize(self.last_seen_block_timestamp)
 
         self.transaction_pool = []
+
+        self.vm = SANVirtualMachine(self.storage)
 
     async def check_dead_peers(self):
         """
@@ -192,16 +201,23 @@ class Node:
         asyncio.run(self.listen_for_peers())
 
     def synchronize(self, last_seen_block_timestamp):
-        nodes_block = requests.get(f"https://{self.incoming_node}/sync?last_seen_block_timestamp={last_seen_block_timestamp}")
+        response = requests.get(f"https://{self.incoming_node}/sync?last_seen_block_timestamp={last_seen_block_timestamp}")
+        nodes_block = response.json() if response.status_code == 200 else None
 
-        if nodes_block:
-            self.blockchain = nodes_block
+        if nodes_block and "block" in nodes_block and "storage" in nodes_block:
+            new_blocks = [block for block in nodes_block["block"] if block.timestamp > last_seen_block_timestamp]
+            if new_blocks:
+                self.blockchain.chain.extend(new_blocks)
+
+                self.storage = nodes_block["storage"]
 
         self.last_seen_block_timestamp = self.blockchain.chain[-1].timestamp
 
     def ask_synchronize(self, last_seen_block_timestamp):
         new_blocks = [block for block in self.blockchain.chain if block.timestamp > last_seen_block_timestamp]
-        return new_blocks
+
+        return {"block": new_blocks if new_blocks else None,
+                "storage": self.storage if new_blocks else None}
 
     async def send_to_controllers(self, block):
         """
@@ -313,6 +329,7 @@ class Node:
             self.blockchain.chain.append(new_block)
             self.send_to_controllers(new_block)
 
+            self.run_bytecodes_of_block(new_block)
             self.update_SAN_balance_for_block(new_block)
             self.transaction_pool = []
 
@@ -325,6 +342,28 @@ class Node:
                 print(f"[NODE] Sent block to {self.outgoing_node}")
         except Exception as e:
             print(f"[ERROR] Could not send block to {self.outgoing_node}: {e}")
+
+    def run_bytecodes_of_block(self, new_block):
+        """
+        bytecode format:
+        bytecode: [[PUSH, 10], [PUSH, 20], [ADD], [HALT]]
+        :param new_block:
+
+        """
+        for transaction in new_block.transactions:
+            try:
+                tx = json.loads(transaction.decode('utf-8'))
+            except Exception as e:
+                raise Exception("Transaction decoding error:", e)
+
+            if "bytecode" in tx:
+                try:
+                    # parse bytecode
+                    bytecode = Parser.parse_instruction_list(tx["bytecode"])
+                    SANVirtualMachine().run(bytecode)
+
+                except Exception as e:
+                    raise Exception(f"{e}")
 
     def update_SAN_balance_for_block(self, new_block):
         collected_fee = 0
