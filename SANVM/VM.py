@@ -1,5 +1,6 @@
 from OpCode import OpCode
 from Storage import Storage
+from SANVM.ContractManager import ContractManager
 
 class SANVirtualMachine:
     def __init__(self, storage=None):
@@ -11,6 +12,8 @@ class SANVirtualMachine:
         self.bytecode = []
 
         self.storage = storage if storage else Storage()
+
+        self.contract_manager = ContractManager(self.storage)
 
         self.instructions = {
             OpCode.PUSH.value: self.push,
@@ -417,3 +420,9 @@ class SANVirtualMachine:
 
     def halt(self):
         self.running = False
+
+    def deploy_contract(self, contract_id, bytecode):
+        return self.contract_manager.deploy_contract(contract_id, bytecode)
+
+    def call_contract_function(self, contract_id, function_name, params):
+        return self.contract_manager.call_contract_function(contract_id, function_name, params)

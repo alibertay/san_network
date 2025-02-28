@@ -2,6 +2,7 @@ class Storage:
     def __init__(self):
         self.data = {}
         self.functions = {}
+        self.contracts = {}
 
     def set_var(self, key, value):
         self.data[key] = value

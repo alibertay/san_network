@@ -1,3 +1,5 @@
+from operator import contains
+
 import requests
 import websockets
 import asyncio
@@ -21,7 +23,7 @@ class Node:
     BLOCK_THRESHOLD_FEE = 500
 
     def __init__(self):
-        self.PEERS = ["127.0.0.1:6161"]
+        self.PEERS = []
 
         self.incoming_node, self.outgoing_node = random.sample(self.PEERS, 2)
         self.controller_nodes = random.sample(self.PEERS, 10)
@@ -342,6 +344,31 @@ class Node:
                 print(f"[NODE] Sent block to {self.outgoing_node}")
         except Exception as e:
             print(f"[ERROR] Could not send block to {self.outgoing_node}: {e}")
+
+    def run_contract_function_of_block(self, new_block):
+        # contract_code = {"command": deploy, contract_id, bytecode}
+        # contract_code = {"command": run, contract_id, function_name, params: []}
+
+        for transaction in new_block.transactions:
+            try:
+                tx = json.loads(transaction.decode('utf-8'))
+            except Exception as e:
+                raise Exception("Transaction decoding error:", e)
+
+            if "contract_code" in tx:
+                try:
+                    contract_code = tx["contract_code"]
+
+                    command = contract_code["command"]
+
+                    if command == "deploy":
+                        self.vm.deploy_contract(contract_code["contract_id"], contract_code["bytecode"])
+
+                    if command == "run":
+                        self.vm.call_contract_function(contract_code["contract_id"], contract_code["function_name"], contract_code["params"])
+
+                except Exception as e:
+                    raise Exception(f"{e}")
 
     def run_bytecodes_of_block(self, new_block):
         """
