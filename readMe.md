@@ -64,6 +64,10 @@ SAN Network uses **FastAPI and WebSockets** for efficient communication:
   - `PING/PONG`: Ensures peer activity.
   - `Gossip Messages`: Spreads updates about dead peers and new blocks.
 
+- **Smart Contract Support**:
+  - `SANVM`: SAN Network's virtual machine
+  - `SANLANG`: Programming language for developing smart contracts / scripts for SANVM
+
 ## Running the SAN Network
 
 ### Requirements
@@ -86,7 +90,6 @@ This will start a FastAPI server for handling transactions and blockchain synchr
 ## Future Improvements
 ✅ Implementing staking mechanisms for validators.  
 ✅ Creating node groups
-✅ Add smart contract support
 
 
 ## Conclusion
