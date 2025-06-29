@@ -1,96 +1,92 @@
-# SAN Network Litepaper
+# 🌐 SAN Network Litepaper
 
-## Introduction
+## 🧭 Introduction
 
-SAN Network is a decentralized blockchain network designed for secure and scalable transaction validation. This network operates with a peer-to-peer (P2P) architecture, allowing nodes to synchronize, validate transactions, and maintain the integrity of the blockchain.
+SAN Network is a decentralized blockchain network designed for secure, scalable, and developer-friendly transaction validation. Operating with a peer-to-peer (P2P) architecture, SAN allows nodes to synchronize, validate transactions, and maintain blockchain integrity — all without centralized control.
 
-## Key Features
+> ✨ SAN now supports **smart contracts** written in the developer-friendly, high-level **PENA programming language**.
 
-- **Fast and Secure Transactions**: Uses Dilithium2 cryptographic signatures to ensure transaction authenticity.
-- **Dynamic Fee Model**: Transaction fees adjust dynamically based on network congestion.
-- **Decentralized Peer Discovery**: Nodes automatically discover and synchronize with other peers in the network.
-- **Gossip Protocol for Network Stability**: Efficient node communication ensures dead peers are identified and removed.
-- **Block Validation Mechanism**: 66% of controller nodes must approve a block before it's added to the chain.
+---
 
-## Blockchain Architecture
+## 🔑 Key Features
 
-SAN Network consists of the following core components:
+- **Post-Quantum Security**: Uses **Dilithium2** cryptographic signatures to future-proof against quantum attacks.
+- **Dynamic Fee Model**: Transaction fees scale with network load.
+- **Decentralized Peer Discovery**: Nodes auto-discover peers and expand organically.
+- **Gossip Protocol**: Maintains network health by removing unresponsive peers.
+- **Smart Contract Support**: Build and deploy contracts in **PENA**, a lightweight high-level language compiled into SANVM bytecode.
 
-### Blockchain
+---
 
-- Maintains an immutable chain of blocks.
-- Includes a **Genesis Block** with an initial validator.
-- Each block contains:
-  - **Index**: Block number.
-  - **Previous Block Hash**: Ensures chain integrity.
-  - **Validator and Signature**: Signed with Dilithium2 algorithm.
-  - **Transactions**: List of validated transactions.
+## 🧱 Blockchain Architecture
 
-### Transactions
+### 🔗 Blockchain
 
-- Transactions are signed using **Dilithium2** for post-quantum security.
-- Dynamic fee calculation based on transaction pool size:
-  - **Minimum Fee**: 0.01 per byte.
-  - **Maximum Fee**: 0.1 per byte (when congestion is high).
-- Signature verification ensures authenticity.
+- Immutable and verifiable chain of blocks.
+- Starts with a **Genesis Block**.
+- Each block includes:
+  - **Index**
+  - **Previous Block Hash**
+  - **Validator & Signature** (Dilithium2)
+  - **Transactions**
+  - **Optional Smart Contract Execution Results**
 
-### Nodes
+### 💸 Transactions
 
-Each node in SAN Network performs the following functions:
+- All transactions are signed using **Dilithium2**.
+- **Dynamic Fees**:
+  - Min: `0.01 SAN` per byte.
+  - Max: `0.1 SAN` per byte (under high congestion).
+- Signature verification is mandatory before mempool acceptance.
 
-- **Peer Discovery**: Connects to bootstrap nodes and expands its peer list.
-- **Transaction Processing**: Accepts, verifies, and propagates transactions.
-- **Block Validation**: Controls and approves new blocks before they are added to the chain.
-- **Gossip Protocol**: Shares peer updates and block approvals across the network.
+### 🖧 Nodes
 
-## Consensus and Block Creation
+Every SAN node performs:
 
-- A block is created when the total transaction fees in the pool exceed **500 SAN**.
-- Validators sign the block using their private key.
-- Controller nodes review and approve the block (66% consensus required).
-- Approved blocks are broadcast to the network.
+- **Peer Discovery** via bootstrap servers.
+- **Transaction Processing** & broadcasting.
+- **Block Validation**: Each validator signs and verifies blocks.
+- **Gossip Updates**: Share block/state info with peers.
+- **Smart Contract Execution** via SANVM + PENA bytecode.
 
-## Network Communication
+---
 
-SAN Network uses **FastAPI and WebSockets** for efficient communication:
+## 🔁 Consensus and Block Creation
 
-- **API Endpoints**:
-  - `/sync`: Synchronizes the blockchain state.
-  - `/transaction`: Submits a new transaction.
-  - `/bootstrap`: Retrieves peer list from bootstrap nodes.
-  - `/join`: Allows a new node to join the network.
+- New block creation is triggered when mempool fees ≥ **500 SAN**.
+- Validator signs the block.
+- **66% consensus** required from controller nodes.
+- Finalized blocks are broadcast to the network.
 
-- **WebSocket Protocol**:
-  - `PING/PONG`: Ensures peer activity.
-  - `Gossip Messages`: Spreads updates about dead peers and new blocks.
+---
 
-- **Smart Contract Support**:
-  - `SANVM`: SAN Network's virtual machine
-  - `SANLANG`: Programming language for developing smart contracts / scripts for SANVM
+## 🔌 Network Communication
 
-## Running the SAN Network
+Uses **FastAPI** for REST + **WebSockets** for P2P events.
 
-### Requirements
+### 🔹 REST API Endpoints
 
-Install dependencies with:
+- `POST /sync` → Blockchain sync  
+- `POST /transaction` → Submit new TX  
+- `GET /bootstrap` → Get known peers  
+- `POST /join` → Join the network
 
-```sh
-pip install -r requirements.txt
-```
-### Identify Private Key on Enviroment
-```sh
-PRIVATE_KEY=YOUR_PRIVATE_KEY
-```
-### Start Node
-```sh
-PRIVATE_KEY=YOUR_PRIVATE_KEY
-```
-This will start a FastAPI server for handling transactions and blockchain synchronization.
+### 🔸 WebSocket Protocol
 
-## Future Improvements
-✅ Implementing staking mechanisms for validators.  
-✅ Creating node groups
+- `PING/PONG` → Peer health check  
+- `GOSSIP` → Propagate new blocks and peer status  
+- `CONTRACT_EXEC` → Broadcast smart contract invocation results  
 
+---
 
-## Conclusion
-SAN Network is a lightweight, scalable blockchain solution focused on decentralization, security, and performance. Its innovative approach to transaction validation and consensus makes it a powerful framework for secure digital transactions.
+## 🔤 Smart Contracts with PENA
+
+SAN supports high-level **PENA** language for smart contract development.
+
+### ✍️ Example
+
+```pena
+function transferTokens(to, amount) {
+  // token logic here
+  print("Sending tokens to " + to)
+}
