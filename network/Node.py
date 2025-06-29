@@ -1,5 +1,3 @@
-from operator import contains
-
 import requests
 import websockets
 import asyncio
@@ -16,6 +14,7 @@ from blockchain.Block import Block
 
 from SANVM.VM import SANVirtualMachine
 from SANVM.Storage import Storage
+from SANVM.pena_parser import PenaParser
 
 from utils.parser import Parser
 
@@ -172,7 +171,7 @@ class Node:
                 print(f"[GOSSIP] Sent new peer info to {self.outgoing_node}.")
         except Exception as e:
             raise f"[ERROR] Could not gossip new peer to {self.outgoing_node}: {e}"
-
+# TODO: Global çağrı ile çözüm? 10 dk geride kalan node global call açar ve veri ister. Ama kimden/nasıl
     async def listen_for_peers(self, host="0.0.0.0", port=8770):
         """
         Start a WebSocket server that listens for PEERS updates.
@@ -358,14 +357,22 @@ class Node:
             if "contract_code" in tx:
                 try:
                     contract_code = tx["contract_code"]
-
                     command = contract_code["command"]
 
                     if command == "deploy":
-                        self.vm.deploy_contract(contract_code["contract_id"], contract_code["bytecode"])
+                        if "pena_code" in contract_code:
+                            parser = PenaParser()
+                            bytecode = parser.parse(contract_code["pena_code"])
+                            self.vm.deploy_contract(contract_code["contract_id"], bytecode)
+                        else:
+                            self.vm.deploy_contract(contract_code["contract_id"], contract_code["bytecode"])
 
-                    if command == "run":
-                        self.vm.call_contract_function(contract_code["contract_id"], contract_code["function_name"], contract_code["params"])
+                    elif command == "run":
+                        self.vm.call_contract_function(
+                            contract_code["contract_id"],
+                            contract_code["function_name"],
+                            contract_code.get("params", [])
+                        )
 
                 except Exception as e:
                     raise Exception(f"{e}")
