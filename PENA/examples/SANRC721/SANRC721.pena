@@ -1,0 +1,199 @@
+token_name = ""
+token_symbol = ""
+contract_owner = ""
+
+owner_of := {}
+balance_of := {}
+token_approvals := {}
+operator_approvals := {}
+
+function init(_name, _symbol, _owner) {
+  token_name = _name
+  token_symbol = _symbol
+  contract_owner = _owner
+}
+
+function name() {
+  return token_name
+}
+
+function symbol() {
+  return token_symbol
+}
+
+function balanceOf(owner) {
+  return balance_of[owner]
+}
+
+function ownerOf(token_id) {
+  o = owner_of[token_id]
+  if (o == "") {
+    print("OWNER_OF_FAILED: NOT_MINTED")
+    return ""
+  }
+  return o
+}
+
+function _operator_key(owner, operator) {
+  return owner + "|" + operator
+}
+
+function getApproved(token_id) {
+  return token_approvals[token_id]
+}
+
+function isApprovedForAll(owner, operator) {
+  key = _operator_key(owner, operator)
+  v = operator_approvals[key]
+  return v
+}
+
+function approve(owner, to, token_id) {
+  current_owner = owner_of[token_id]
+
+  if (current_owner == "") {
+    print("APPROVE_FAILED: NOT_MINTED")
+    return 0
+  }
+
+  if (current_owner != owner) {
+    print("APPROVE_FAILED: NOT_OWNER")
+    return 0
+  }
+
+  token_approvals[token_id] = to
+  print("APPROVE_OK: " + to)
+  return 1
+}
+
+function setApprovalForAll(owner, operator, approved) {
+  key = _operator_key(owner, operator)
+  if (approved == 1) {
+    operator_approvals[key] = 1
+  }
+  else {
+    operator_approvals[key] = 0
+  }
+
+  print("APPROVAL_FOR_ALL_OK: " + owner + " -> " + operator)
+  return 1
+}
+
+function _isApprovedOrOwner(spender, token_id) {
+  token_owner = owner_of[token_id]
+
+  if (token_owner == "") {
+    return 0
+  }
+
+  if (spender == token_owner) {
+    return 1
+  }
+
+  approved = token_approvals[token_id]
+  if (spender == approved) {
+    return 1
+  }
+
+  key = _operator_key(token_owner, spender)
+  is_op = operator_approvals[key]
+  if (is_op == 1) {
+    return 1
+  }
+
+  return 0
+}
+
+function _transfer(from, to, token_id) {
+  current_owner = owner_of[token_id]
+
+  if (current_owner != from) {
+    print("TRANSFER_FAILED: NOT_OWNER")
+    return 0
+  }
+
+  if (to == "") {
+    print("TRANSFER_FAILED: INVALID_RECIPIENT")
+    return 0
+  }
+
+  owner_of[token_id] = to
+
+  from_balance = balance_of[from]
+  balance_of[from] = from_balance - 1
+
+  to_balance = balance_of[to]
+  balance_of[to] = to_balance + 1
+
+  token_approvals[token_id] = ""
+
+  print("TRANSFER_OK: " + from + " -> " + to)
+  return 1
+}
+
+function transferFrom(spender, from, to, token_id) {
+  ok = _isApprovedOrOwner(spender, token_id)
+  if (ok == 0) {
+    print("TRANSFER_FROM_FAILED: NOT_AUTHORIZED")
+    return 0
+  }
+
+  current_owner = owner_of[token_id]
+  if (current_owner != from) {
+    print("TRANSFER_FROM_FAILED: FROM_NOT_OWNER")
+    return 0
+  }
+
+  result = _transfer(from, to, token_id)
+  return result
+}
+
+function mint(caller, to, token_id) {
+  if (caller != contract_owner) {
+    print("MINT_FAILED: NOT_CONTRACT_OWNER")
+    return 0
+  }
+
+  existing = owner_of[token_id]
+  if (existing != "") {
+    print("MINT_FAILED: ALREADY_MINTED")
+    return 0
+  }
+
+  if (to == "") {
+    print("MINT_FAILED: INVALID_RECIPIENT")
+    return 0
+  }
+
+  owner_of[token_id] = to
+
+  to_balance = balance_of[to]
+  balance_of[to] = to_balance + 1
+
+  print("MINT_OK: " + to + " TOKEN_ID: ")
+  return 1
+}
+
+function burn(caller, token_id) {
+  current_owner = owner_of[token_id]
+
+  if (current_owner == "") {
+    print("BURN_FAILED: NOT_MINTED")
+    return 0
+  }
+
+  if (caller != current_owner) {
+    print("BURN_FAILED: NOT_OWNER")
+    return 0
+  }
+
+  owner_of[token_id] = ""
+
+  caller_balance = balance_of[caller]
+  balance_of[caller] = caller_balance - 1
+
+  token_approvals[token_id] = ""
+
+  print("BURN_OK: " + caller)
+  return 1
+}

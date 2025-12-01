@@ -1,0 +1,24 @@
+DEPLOY
+{
+  "contract_code": {
+    "command": "deploy",
+    "contract_id": "AMM",
+    "pena_code": "/* buraya AMM.pena içeriği */"
+  }
+}
+
+
+run
+{
+  "contract_code": {
+    "command": "run",
+    "contract_id": "AMM",
+    "function_name": "init",
+    "params": [
+      "SANRC20",   // _token0
+      "USDT",      // _token1
+      30,          // _fee_bps (0.3%)
+      "0xOWNER"    // _owner (dex_owner)
+    ]
+  }
+}

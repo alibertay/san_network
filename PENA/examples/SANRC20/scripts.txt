@@ -1,0 +1,40 @@
+DEPLOY
+
+{
+  "contract_code": {
+    "command": "deploy",
+    "contract_id": "sanrc20",
+    "pena_code": "/* buraya SANRC20.pena iiçeriği */"
+  }
+}
+
+
+{
+  "contract_code": {
+    "command": "run",
+    "contract_id": "sanrc20",
+    "function_name": "init",
+    "params": [
+      "SAN Token",
+      "SANRC20",
+      18,
+      1000000,
+      "0xOWNER"
+    ]
+  }
+}
+
+CALL
+
+{
+  "contract_code": {
+    "command": "run",
+    "contract_id": "sanrc20",
+    "function_name": "transfer",
+    "params": [
+      "0xALICE",
+      "0xBOB",
+      100
+    ]
+  }
+}

@@ -1,0 +1,232 @@
+token0 = ""
+token1 = ""
+fee_bps = 30
+dex_owner = ""
+
+reserve0 = 0
+reserve1 = 0
+
+total_lp_shares = 0
+lp_shares := {}
+
+function init(_token0, _token1, _fee_bps, _owner) {
+  token0 = _token0
+  token1 = _token1
+  fee_bps = _fee_bps
+  dex_owner = _owner
+}
+
+function getToken0() {
+  return token0
+}
+
+function getToken1() {
+  return token1
+}
+
+function getFeeBps() {
+  return fee_bps
+}
+
+function setFeeBps(caller, new_fee_bps) {
+  if (caller != dex_owner) {
+    print("SET_FEE_FAILED: NOT_OWNER")
+    return 0
+  }
+
+  if (new_fee_bps < 0) {
+    print("SET_FEE_FAILED: INVALID_FEE")
+    return 0
+  }
+
+  fee_bps = new_fee_bps
+  print("SET_FEE_OK")
+  return 1
+}
+
+function getReserves0() {
+  return reserve0
+}
+
+function getReserves1() {
+  return reserve1
+}
+
+function balanceOfLP(account) {
+  return lp_shares[account]
+}
+
+function _min(a, b) {
+  if (a < b) {
+    return a
+  }
+  return b
+}
+
+function addLiquidity(provider, amount0, amount1) {
+  if (amount0 <= 0) {
+    print("ADD_LIQUIDITY_FAILED: AMOUNT0_ZERO")
+    return 0
+  }
+
+  if (amount1 <= 0) {
+    print("ADD_LIQUIDITY_FAILED: AMOUNT1_ZERO")
+    return 0
+  }
+
+  if (total_lp_shares == 0) {
+    reserve0 = amount0
+    reserve1 = amount1
+
+    lp_minted = amount0 + amount1
+
+    lp_shares[provider] = lp_minted
+    total_lp_shares = lp_minted
+
+    print("ADD_LIQUIDITY_OK: FIRST_PROVIDER")
+    return lp_minted
+  }
+
+  if (reserve0 == 0 || reserve1 == 0) {
+    print("ADD_LIQUIDITY_FAILED: BROKEN_POOL")
+    return 0
+  }
+
+  lhs = amount0 * reserve1
+  rhs = amount1 * reserve0
+
+  if (lhs != rhs) {
+    print("ADD_LIQUIDITY_FAILED: BAD_RATIO")
+    return 0
+  }
+
+  lp_from_token0 = amount0 * total_lp_shares / reserve0
+  lp_from_token1 = amount1 * total_lp_shares / reserve1
+
+  lp_minted2 = _min(lp_from_token0, lp_from_token1)
+
+  if (lp_minted2 <= 0) {
+    print("ADD_LIQUIDITY_FAILED: LP_ZERO")
+    return 0
+  }
+
+  reserve0 = reserve0 + amount0
+  reserve1 = reserve1 + amount1
+
+  current_lp = lp_shares[provider]
+  lp_shares[provider] = current_lp + lp_minted2
+  total_lp_shares = total_lp_shares + lp_minted2
+
+  print("ADD_LIQUIDITY_OK")
+  return lp_minted2
+}
+
+function removeLiquidity(provider, lp_amount) {
+  if (lp_amount <= 0) {
+    print("REMOVE_LIQUIDITY_FAILED: ZERO_LP")
+    return 0
+  }
+
+  provider_lp = lp_shares[provider]
+  if (provider_lp < lp_amount) {
+    print("REMOVE_LIQUIDITY_FAILED: INSUFFICIENT_LP")
+    return 0
+  }
+
+  if (total_lp_shares == 0) {
+    print("REMOVE_LIQUIDITY_FAILED: NO_LP_TOTAL")
+    return 0
+  }
+
+  amount0_out = reserve0 * lp_amount / total_lp_shares
+  amount1_out = reserve1 * lp_amount / total_lp_shares
+
+  if (amount0_out <= 0 && amount1_out <= 0) {
+    print("REMOVE_LIQUIDITY_FAILED: OUTPUT_ZERO")
+    return 0
+  }
+
+  reserve0 = reserve0 - amount0_out
+  reserve1 = reserve1 - amount1_out
+
+  lp_shares[provider] = provider_lp - lp_amount
+  total_lp_shares = total_lp_shares - lp_amount
+
+  print("REMOVE_LIQUIDITY_OK")
+  return amount0_out
+}
+
+function _getAmountOut(amount_in, reserve_in, reserve_out) {
+  if (amount_in <= 0) {
+    return 0
+  }
+
+  if (reserve_in <= 0 || reserve_out <= 0) {
+    return 0
+  }
+
+  fee_den = 10000
+  fee_num = fee_den - fee_bps
+
+  amount_in_with_fee = amount_in * fee_num
+
+  numerator = amount_in_with_fee * reserve_out
+  denominator = reserve_in * fee_den + amount_in_with_fee
+
+  if (denominator == 0) {
+    return 0
+  }
+
+  amount_out = numerator / denominator
+  return amount_out
+}
+
+function swap0For1(trader, amount0_in) {
+  if (amount0_in <= 0) {
+    print("SWAP_0_FOR_1_FAILED: ZERO_IN")
+    return 0
+  }
+
+  amount1_out = _getAmountOut(amount0_in, reserve0, reserve1)
+
+  if (amount1_out <= 0) {
+    print("SWAP_0_FOR_1_FAILED: ZERO_OUT")
+    return 0
+  }
+
+  if (amount1_out > reserve1) {
+    print("SWAP_0_FOR_1_FAILED: INSUFFICIENT_LIQUIDITY")
+    return 0
+  }
+
+  reserve0 = reserve0 + amount0_in
+  reserve1 = reserve1 - amount1_out
+
+  print("SWAP_0_FOR_1_OK")
+  return amount1_out
+}
+
+function swap1For0(trader, amount1_in) {
+  if (amount1_in <= 0) {
+    print("SWAP_1_FOR_0_FAILED: ZERO_IN")
+    return 0
+  }
+
+  amount0_out = _getAmountOut(amount1_in, reserve1, reserve0)
+
+  if (amount0_out <= 0) {
+    print("SWAP_1_FOR_0_FAILED: ZERO_OUT")
+    return 0
+  }
+
+  if (amount0_out > reserve0) {
+    print("SWAP_1_FOR_0_FAILED: INSUFFICIENT_LIQUIDITY")
+    return 0
+  }
+
+  reserve1 = reserve1 + amount1_in
+  reserve0 = reserve0 - amount0_out
+
+  print("SWAP_1_FOR_0_OK")
+  return amount0_out
+}

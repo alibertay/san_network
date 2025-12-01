@@ -1,0 +1,52 @@
+DEPLOY 
+
+
+{
+  "contract_code": {
+    "command": "deploy",
+    "contract_id": "sanrc721",
+    "pena_code": "/* buraya SANRC721.pena içeriği */"
+  }
+}
+
+{
+  "contract_code": {
+    "command": "run",
+    "contract_id": "sanrc721",
+    "function_name": "init",
+    "params": [
+      "SAN NFT",       // _name
+      "SANRC721",      // _symbol
+      "0xOWNER"        // _owner (contract_owner)
+    ]
+  }
+}
+
+
+CALL
+
+MINT
+{
+  "contract_code": {
+    "command": "run",
+    "contract_id": "sanrc721",
+    "function_name": "mint",
+    "params": [
+      "0xOWNER",     // caller (contract_owner olmalı)
+      "0xALICE",     // to
+      1              // token_id
+    ]
+  }
+}
+
+ownerOf
+{
+  "contract_code": {
+    "command": "run",
+    "contract_id": "sanrc721",
+    "function_name": "ownerOf",
+    "params": [
+      1              // token_id
+    ]
+  }
+}

@@ -1,0 +1,130 @@
+token_name = ""
+token_symbol = ""
+token_decimals = 18
+token_total_supply = 0
+
+token_owner = ""
+
+balances := {}
+allowances := {}
+
+function init(_name, _symbol, _decimals, _initial_supply, _owner) {
+  token_name = _name
+  token_symbol = _symbol
+  token_decimals = _decimals
+  token_total_supply = _initial_supply
+  token_owner = _owner
+
+  balances[_owner] = _initial_supply
+}
+
+function name() {
+  return token_name
+}
+
+function symbol() {
+  return token_symbol
+}
+
+function decimals() {
+  return token_decimals
+}
+
+function totalSupply() {
+  return token_total_supply
+}
+
+function balanceOf(account) {
+  return balances[account]
+}
+
+function _allowance_key(owner, spender) {
+  return owner + "|" + spender
+}
+
+function allowance(owner, spender) {
+  key = _allowance_key(owner, spender)
+  value = allowances[key]
+  return value
+}
+
+function transfer(from, to, amount) {
+  from_balance = balances[from]
+
+  if (from_balance < amount) {
+    print("TRANSFER_FAILED: INSUFFICIENT_BALANCE")
+    return 0
+  }
+
+  balances[from] = from_balance - amount
+
+  to_balance = balances[to]
+  balances[to] = to_balance + amount
+
+  print("TRANSFER_OK: " + from + " -> " + to)
+  return 1
+}
+
+function approve(owner, spender, amount) {
+  key = _allowance_key(owner, spender)
+  allowances[key] = amount
+
+  print("APPROVE_OK: " + owner + " -> " + spender)
+  return 1
+}
+
+function transferFrom(spender, from, to, amount) {
+  key = _allowance_key(from, spender)
+  current = allowances[key]
+
+  if (current < amount) {
+    print("TRANSFER_FROM_FAILED: NOT_ALLOWED")
+    return 0
+  }
+
+  from_balance = balances[from]
+  if (from_balance < amount) {
+    print("TRANSFER_FROM_FAILED: INSUFFICIENT_BALANCE")
+    return 0
+  }
+
+  balances[from] = from_balance - amount
+
+  to_balance = balances[to]
+  balances[to] = to_balance + amount
+
+  allowances[key] = current - amount
+
+  print("TRANSFER_FROM_OK: " + from + " -> " + to)
+  return 1
+}
+
+function mint(caller, to, amount) {
+  if (caller != token_owner) {
+    print("MINT_FAILED: NOT_OWNER")
+    return 0
+  }
+
+  to_balance = balances[to]
+  balances[to] = to_balance + amount
+
+  token_total_supply = token_total_supply + amount
+
+  print("MINT_OK: " + to)
+  return 1
+}
+
+function burn(caller, amount) {
+  caller_balance = balances[caller]
+
+  if (caller_balance < amount) {
+    print("BURN_FAILED: INSUFFICIENT_BALANCE")
+    return 0
+  }
+
+  balances[caller] = caller_balance - amount
+  token_total_supply = token_total_supply - amount
+
+  print("BURN_OK: " + caller)
+  return 1
+}
