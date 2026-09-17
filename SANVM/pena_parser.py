@@ -1,74 +1,123 @@
+"""High-level PENA compiler: lowers human-friendly syntax to PENA Assembly.
+
+The parser no longer emits bytecode directly. Every construct is lowered to
+assembly instructions (``(mnemonic, operands)`` records, see ``SANVM.asm``)
+and the shared assembler resolves labels and encodes the final bytecode. This
+keeps a single source of truth for instruction encoding and makes inline
+``asm { ... }`` blocks first-class citizens of the high-level language.
+"""
+
 import ast
 import re
-from typing import Any, List
+from typing import Any, Dict, List, Tuple
 
-from SANVM.OpCode import OpCode
+from SANVM import asm
+from SANVM.asm import LABEL, Instruction, assemble, encode, looks_like_assembly, parse_lines
 
 TOKEN_RE = re.compile(
     r'"(?:[^"\\]|\\.)*"|\d+\.\d+|\d+|[A-Za-z_]\w*|==|!=|<=|>=|&&|\|\||[-+*/%<>()\[\],!]'
 )
 
-LABEL_PREFIX = "\x00L"
-
-BINARY_OPCODES = {
-    "+": OpCode.ADD,
-    "-": OpCode.SUB,
-    "*": OpCode.MUL,
-    "/": OpCode.DIV,
-    "%": OpCode.MOD,
-    "==": OpCode.EQ,
-    "!=": OpCode.NEQ,
-    "<": OpCode.LT,
-    "<=": OpCode.LTE,
-    ">": OpCode.GT,
-    ">=": OpCode.GTE,
+BINARY_MNEMONICS = {
+    "+": "ADD",
+    "-": "SUB",
+    "*": "MUL",
+    "/": "DIV",
+    "%": "MOD",
+    "==": "EQ",
+    "!=": "NEQ",
+    "<": "LT",
+    "<=": "LTE",
+    ">": "GT",
+    ">=": "GTE",
 }
 
 COMPARISON_OPERATORS = ("==", "!=", "<", "<=", ">", ">=")
 
-TARGET_OPCODES = {
-    OpCode.JMP.value,
-    OpCode.JZ.value,
-    OpCode.JNZ.value,
-    OpCode.DEF_FUNC.value,
-}
-
-
-class _LabelMarker:
-    """Marks a position in the bytecode stream; removed during resolution."""
-
-    __slots__ = ("name",)
-
-    def __init__(self, name: str):
-        self.name = name
+ASM_PLACEHOLDER_PREFIX = "\x00ASM"
+ASM_PLACEHOLDER_SUFFIX = "\x00"
 
 
 class PenaParser:
-    """Compiles PENA source into SANVM bytecode.
+    """Compiles PENA source into SANVM bytecode through PENA Assembly.
 
-    The compiler is two-pass: statements emit symbolic labels which are
-    resolved to real instruction indices before execution, so jumps always
-    point at valid positions.
+    The compiler is two-pass: constructs emit assembly records with symbolic
+    labels, then the assembler resolves labels to real instruction indices, so
+    jumps always point at valid positions. ``asm { ... }`` blocks are parsed by
+    the same assembler and merged into the surrounding program; their labels
+    are namespaced per block so identical names cannot collide.
     """
 
     def __init__(self):
-        self.bytecode: List[Any] = []
+        self.program: List[Instruction] = []
         self.label_counter = 0
         self.loop_stack: list[tuple[str, str]] = []
         self._tokens: List[str] = []
         self._position = 0
+        self._asm_blocks: Dict[int, str] = {}
 
     # ------------------------------------------------------------------ #
     # Entry point
     # ------------------------------------------------------------------ #
 
     def parse(self, source: str) -> List[Any]:
-        self.bytecode = []
+        source, self._asm_blocks = self._extract_asm_blocks(source)
+        self.program = []
         self.label_counter = 0
         self.loop_stack = []
         lines = self._preprocess(source)
         self._parse_block(lines, 0)
-        return self._resolve_labels(self.bytecode)
+        return encode(self.program)
+
+    # ------------------------------------------------------------------ #
+    # Emission helpers
+    # ------------------------------------------------------------------ #
+
+    def _emit(self, mnemonic: str, *operands: Any) -> None:
+        self.program.append((mnemonic, list(operands)))
+
+    def _label(self, name: str) -> None:
+        self.program.append((LABEL, [name]))
+
+    def _new_label(self) -> str:
+        self.label_counter += 1
+        return f".L{self.label_counter}"
+
+    # ------------------------------------------------------------------ #
+    # Inline assembly blocks
+    # ------------------------------------------------------------------ #
+
+    def _extract_asm_blocks(self, source: str) -> Tuple[str, Dict[int, str]]:
+        """Replace ``asm { ... }`` blocks with placeholders (brace aware)."""
+        pattern = re.compile(r"(?m)^[ \t]*asm[ \t]*\{")
+        blocks: Dict[int, str] = {}
+        out: List[str] = []
+        last = 0
+
+        for match in pattern.finditer(source):
+            brace_index = source.index("{", match.start())
+            close = asm.matching_brace(source, brace_index)
+            if close == -1:
+                raise ValueError("Unterminated asm block")
+            line_end = source.find("\n", close)
+            if line_end == -1:
+                line_end = len(source)
+            tail = asm.strip_comment(source[close + 1:line_end]).strip()
+            if tail:
+                raise ValueError(f"Unexpected text after asm block: {tail!r}")
+
+            out.append(source[last:match.start()])
+            out.append(f"{ASM_PLACEHOLDER_PREFIX}{len(blocks)}{ASM_PLACEHOLDER_SUFFIX}")
+            blocks[len(blocks)] = source[brace_index + 1:close]
+            last = line_end
+
+        out.append(source[last:])
+        return "".join(out), blocks
+
+    def _parse_inline_assembly(self, placeholder: str) -> None:
+        block_id = int(placeholder[len(ASM_PLACEHOLDER_PREFIX):-len(ASM_PLACEHOLDER_SUFFIX)])
+        content = self._asm_blocks[block_id]
+        self.program.extend(parse_lines(content.splitlines(), namespace=f".A{block_id}."))
 
     # ------------------------------------------------------------------ #
     # Source preparation
@@ -159,6 +208,10 @@ class PenaParser:
             if line == "{":
                 i += 1
                 continue
+            if line.startswith(ASM_PLACEHOLDER_PREFIX) and line.endswith(ASM_PLACEHOLDER_SUFFIX):
+                self._parse_inline_assembly(line)
+                i += 1
+                continue
 
             if line.startswith("function "):
                 i = self._parse_function(lines, i)
@@ -192,9 +245,22 @@ class PenaParser:
                 self._parse_assignment(line)
                 i += 1
             else:
+                self._reject_bare_assembly(line)
                 i += 1
 
         return i
+
+    @staticmethod
+    def _reject_bare_assembly(line: str) -> None:
+        parts = line.split(None, 1)
+        if not parts:
+            return
+        word = parts[0].upper()
+        if word in asm.MNEMONICS or word in asm.VAR_MACROS or word == "FUNC":
+            raise ValueError(
+                f"Bare assembly instruction {parts[0]!r}; wrap it in an "
+                f"'asm {{ ... }}' block or deploy with language='asm'"
+            )
 
     def _parse_function(self, lines: List[str], i: int) -> int:
         match = re.match(r"function\s+(\w+)\s*\((.*?)\)", lines[i])
@@ -207,24 +273,17 @@ class PenaParser:
         body_label = self._new_label()
         skip_label = self._new_label()
 
-        self.bytecode.extend([OpCode.PUSH.value, name])
+        self._emit("PUSH", name)
         for param in params:
-            self.bytecode.extend([OpCode.PUSH.value, param])
-        self.bytecode.extend(
-            [
-                OpCode.PUSH.value,
-                len(params),
-                OpCode.DEF_FUNC.value,
-                body_label,
-                OpCode.JMP.value,
-                skip_label,
-            ]
-        )
+            self._emit("PUSH", param)
+        self._emit("PUSH", len(params))
+        self._emit("DEF_FUNC", body_label)
+        self._emit("JMP", skip_label)
 
-        self._mark(body_label)
+        self._label(body_label)
         i = self._parse_block(lines, i + 1)
-        self.bytecode.append(OpCode.END_FUNC.value)
-        self._mark(skip_label)
+        self._emit("END_FUNC")
+        self._label(skip_label)
         return i
 
     def _parse_for(self, lines: List[str], i: int) -> int:
@@ -238,61 +297,47 @@ class PenaParser:
         end_label = self._new_label()
 
         # var = start
-        self.bytecode.extend(
-            [OpCode.PUSH.value, var, OpCode.PUSH.value, start, OpCode.SET.value]
-        )
+        self._emit("PUSH", var)
+        self._emit("PUSH", start)
+        self._emit("SET")
 
-        self._mark(check_label)
-        self.bytecode.extend(
-            [
-                OpCode.PUSH.value,
-                var,
-                OpCode.GET.value,
-                OpCode.PUSH.value,
-                end,
-                OpCode.LT.value,
-                OpCode.JZ.value,
-                end_label,
-            ]
-        )
+        self._label(check_label)
+        self._emit("PUSH", var)
+        self._emit("GET")
+        self._emit("PUSH", end)
+        self._emit("LT")
+        self._emit("JZ", end_label)
 
         # `continue` jumps here: increment first, then re-check the condition.
         self.loop_stack.append((continue_label, end_label))
         i = self._parse_block(lines, i + 1)
         self.loop_stack.pop()
 
-        self._mark(continue_label)
-        self.bytecode.extend(
-            [
-                OpCode.PUSH.value,
-                var,
-                OpCode.PUSH.value,
-                var,
-                OpCode.GET.value,
-                OpCode.PUSH.value,
-                1,
-                OpCode.ADD.value,
-                OpCode.SET.value,
-            ]
-        )
-        self.bytecode.extend([OpCode.JMP.value, check_label])
-        self._mark(end_label)
+        self._label(continue_label)
+        self._emit("PUSH", var)
+        self._emit("PUSH", var)
+        self._emit("GET")
+        self._emit("PUSH", 1)
+        self._emit("ADD")
+        self._emit("SET")
+        self._emit("JMP", check_label)
+        self._label(end_label)
         return i
 
     def _parse_while(self, lines: List[str], i: int) -> int:
         continue_label = self._new_label()
         end_label = self._new_label()
 
-        self._mark(continue_label)
+        self._label(continue_label)
         self._compile_expression(self._tokenize_expression(self._extract_condition(lines[i])))
-        self.bytecode.extend([OpCode.JZ.value, end_label])
+        self._emit("JZ", end_label)
 
         self.loop_stack.append((continue_label, end_label))
         i = self._parse_block(lines, i + 1)
         self.loop_stack.pop()
 
-        self.bytecode.extend([OpCode.JMP.value, continue_label])
-        self._mark(end_label)
+        self._emit("JMP", continue_label)
+        self._label(end_label)
         return i
 
     def _parse_if(self, lines: List[str], i: int) -> int:
@@ -305,19 +350,19 @@ class PenaParser:
         if i < len(lines) and lines[i].startswith("else"):
             i = self._parse_block(lines, i + 1)
 
-        self._mark(end_label)
+        self._label(end_label)
         return i
 
     def _parse_conditional_branch(self, lines: List[str], i: int, end_label: str) -> int:
         next_label = self._new_label()
 
         self._compile_expression(self._tokenize_expression(self._extract_condition(lines[i])))
-        self.bytecode.extend([OpCode.JZ.value, next_label])
+        self._emit("JZ", next_label)
 
         i = self._parse_block(lines, i + 1)
 
-        self.bytecode.extend([OpCode.JMP.value, end_label])
-        self._mark(next_label)
+        self._emit("JMP", end_label)
+        self._label(next_label)
         return i
 
     # ------------------------------------------------------------------ #
@@ -330,15 +375,15 @@ class PenaParser:
         subscript = re.match(r"^(\w+)\s*\[(.*)\]$", target)
         if subscript:
             name, index_expr = subscript.group(1), subscript.group(2)
-            self.bytecode.extend([OpCode.PUSH.value, name])
+            self._emit("PUSH", name)
             self._compile_expression(self._tokenize_expression(index_expr))
             self._compile_expression(self._tokenize_expression(expr))
-            self.bytecode.append(OpCode.DICT_SET.value)
+            self._emit("DICT_SET")
             return
 
-        self.bytecode.extend([OpCode.PUSH.value, target])
+        self._emit("PUSH", target)
         self._compile_expression(self._tokenize_expression(expr))
-        self.bytecode.append(OpCode.SET.value)
+        self._emit("SET")
 
     def _parse_struct_literal(self, line: str):
         # Example: mylist := [1, 2, 3]
@@ -347,19 +392,19 @@ class PenaParser:
         if value.startswith("["):
             inner = value[1:value.rindex("]")] if value.endswith("]") else value[1:]
             items = self._split_arguments(inner)
-            self.bytecode.extend(
-                [OpCode.PUSH.value, var, OpCode.PUSH.value, [], OpCode.SET.value]
-            )
+            self._emit("PUSH", var)
+            self._emit("PUSH", [])
+            self._emit("SET")
             for item in items:
-                self.bytecode.extend([OpCode.PUSH.value, var])
+                self._emit("PUSH", var)
                 self._compile_expression(self._tokenize_expression(item))
-                self.bytecode.append(OpCode.LIST_APPEND.value)
+                self._emit("LIST_APPEND")
             return
 
         if value.startswith("{"):
-            self.bytecode.extend(
-                [OpCode.PUSH.value, var, OpCode.PUSH.value, {}, OpCode.SET.value]
-            )
+            self._emit("PUSH", var)
+            self._emit("PUSH", {})
+            self._emit("SET")
             return
 
         self._parse_assignment(line.replace(":=", "=", 1))
@@ -370,14 +415,14 @@ class PenaParser:
         if expr.strip():
             self._compile_expression(self._tokenize_expression(expr))
         else:
-            self.bytecode.extend([OpCode.PUSH.value, ""])
-        self.bytecode.append(OpCode.PRINT.value)
+            self._emit("PUSH", "")
+        self._emit("PRINT")
 
     def _parse_return(self, line: str):
         expr = line[len("return"):].strip()
         if expr:
             self._compile_expression(self._tokenize_expression(expr))
-        self.bytecode.append(OpCode.RET.value)
+        self._emit("RET")
 
     def _parse_function_call(self, line: str):
         inner = line[len("woof "):].strip()
@@ -391,15 +436,9 @@ class PenaParser:
         for arg in args:
             self._compile_expression(self._tokenize_expression(arg))
 
-        self.bytecode.extend(
-            [
-                OpCode.PUSH.value,
-                name,
-                OpCode.PUSH.value,
-                len(args),
-                OpCode.CALL_FUNC.value,
-            ]
-        )
+        self._emit("PUSH", name)
+        self._emit("PUSH", len(args))
+        self._emit("CALL_FUNC")
 
     # ------------------------------------------------------------------ #
     # Loop control
@@ -409,13 +448,13 @@ class PenaParser:
         if not self.loop_stack:
             raise ValueError("'break' used outside of a loop")
         _, end_label = self.loop_stack[-1]
-        self.bytecode.extend([OpCode.JMP.value, end_label])
+        self._emit("JMP", end_label)
 
     def _emit_continue(self):
         if not self.loop_stack:
             raise ValueError("'continue' used outside of a loop")
         continue_label, _ = self.loop_stack[-1]
-        self.bytecode.extend([OpCode.JMP.value, continue_label])
+        self._emit("JMP", continue_label)
 
     # ------------------------------------------------------------------ #
     # Expressions (recursive descent)
@@ -445,47 +484,48 @@ class PenaParser:
         while self._peek() == "||":
             self._next()
             self._parse_and()
-            self.bytecode.append(OpCode.OR.value)
+            self._emit("OR")
 
     def _parse_and(self):
         self._parse_comparison()
         while self._peek() == "&&":
             self._next()
             self._parse_comparison()
-            self.bytecode.append(OpCode.AND.value)
+            self._emit("AND")
 
     def _parse_comparison(self):
         self._parse_additive()
         while self._peek() in COMPARISON_OPERATORS:
             operator = self._next()
             self._parse_additive()
-            self.bytecode.append(BINARY_OPCODES[operator].value)
+            self._emit(BINARY_MNEMONICS[operator])
 
     def _parse_additive(self):
         self._parse_multiplicative()
         while self._peek() in ("+", "-"):
             operator = self._next()
             self._parse_multiplicative()
-            self.bytecode.append(BINARY_OPCODES[operator].value)
+            self._emit(BINARY_MNEMONICS[operator])
 
     def _parse_multiplicative(self):
         self._parse_unary()
         while self._peek() in ("*", "/", "%"):
             operator = self._next()
             self._parse_unary()
-            self.bytecode.append(BINARY_OPCODES[operator].value)
+            self._emit(BINARY_MNEMONICS[operator])
 
     def _parse_unary(self):
         if self._peek() == "-":
             self._next()
-            self.bytecode.extend([OpCode.PUSH.value, 0])
+            self._emit("PUSH", 0)
             self._parse_unary()
-            self.bytecode.append(OpCode.SUB.value)
+            self._emit("SUB")
             return
         if self._peek() == "!":
             self._next()
             self._parse_unary()
-            self.bytecode.extend([OpCode.PUSH.value, 0, OpCode.EQ.value])
+            self._emit("PUSH", 0)
+            self._emit("EQ")
             return
         self._parse_primary()
 
@@ -495,30 +535,31 @@ class PenaParser:
             raise ValueError("Unexpected end of expression")
 
         if token.startswith('"'):
-            self.bytecode.extend([OpCode.PUSH.value, ast.literal_eval(token)])
+            self._emit("PUSH", ast.literal_eval(token))
             return
 
         if self._is_number(token):
             value = int(token) if "." not in token else float(token)
-            self.bytecode.extend([OpCode.PUSH.value, value])
+            self._emit("PUSH", value)
             return
 
         if token.isidentifier():
             if self._peek() == "[":
                 self._next()  # consume '['
-                self.bytecode.extend([OpCode.PUSH.value, token])
+                self._emit("PUSH", token)
                 self._parse_or()
                 closing = self._next()
                 if closing != "]":
                     raise ValueError(f"Expected ']' but found {closing!r}")
-                self.bytecode.append(OpCode.DICT_GET.value)
+                self._emit("DICT_GET")
                 return
 
             if self._peek() == "(":
                 self._parse_call_arguments(token)
                 return
 
-            self.bytecode.extend([OpCode.PUSH.value, token, OpCode.GET.value])
+            self._emit("PUSH", token)
+            self._emit("GET")
             return
 
         if token == "(":
@@ -552,61 +593,16 @@ class PenaParser:
         if closing != ")":
             raise ValueError(f"Expected ')' but found {closing!r}")
 
-        self.bytecode.extend(
-            [
-                OpCode.PUSH.value,
-                name,
-                OpCode.PUSH.value,
-                arg_count,
-                OpCode.CALL_FUNC.value,
-            ]
-        )
+        self._emit("PUSH", name)
+        self._emit("PUSH", arg_count)
+        self._emit("CALL_FUNC")
 
     def _tokenize_expression(self, expr: str) -> List[str]:
         return TOKEN_RE.findall(expr)
 
     # ------------------------------------------------------------------ #
-    # Labels and argument splitting
+    # Argument splitting
     # ------------------------------------------------------------------ #
-
-    def _new_label(self) -> str:
-        self.label_counter += 1
-        return f"{LABEL_PREFIX}{self.label_counter}"
-
-    def _mark(self, label: str):
-        self.bytecode.append(_LabelMarker(label))
-
-    def _resolve_labels(self, bytecode: List[Any]) -> List[Any]:
-        positions: dict[str, int] = {}
-        flat: List[Any] = []
-        for item in bytecode:
-            if isinstance(item, _LabelMarker):
-                positions[item.name] = len(flat)
-            else:
-                flat.append(item)
-
-        resolved = []
-        i = 0
-        while i < len(flat):
-            item = flat[i]
-            resolved.append(item)
-
-            next_item = flat[i + 1] if i + 1 < len(flat) else None
-            if (
-                isinstance(item, int)
-                and item in TARGET_OPCODES
-                and isinstance(next_item, str)
-                and next_item.startswith(LABEL_PREFIX)
-            ):
-                if next_item not in positions:
-                    raise ValueError(f"Unknown label: {next_item!r}")
-                resolved.append(positions[next_item])
-                i += 2
-                continue
-
-            i += 1
-
-        return resolved
 
     @staticmethod
     def _extract_condition(line: str) -> str:
@@ -647,3 +643,24 @@ class PenaParser:
         if tail:
             args.append(tail)
         return args
+
+
+def compile_pena(source: str, language: str | None = None) -> List[Any]:
+    """Compile PENA or PENA Assembly source into SANVM bytecode.
+
+    ``language`` may be ``"pena"`` (high level), ``"asm"`` (assembly) or
+    ``None`` for auto-detection: clearly assembly-looking sources are
+    assembled, everything else goes through the high-level compiler.
+    """
+    if language is None:
+        selected = "asm" if looks_like_assembly(source) else "pena"
+    elif isinstance(language, str):
+        selected = language.strip().lower()
+    else:
+        raise ValueError(f"Unknown language: {language!r}")
+
+    if selected in ("asm", "assembly", "pasm"):
+        return assemble(source)
+    if selected in ("pena", "hl", "high-level"):
+        return PenaParser().parse(source)
+    raise ValueError(f"Unknown language: {language!r}")

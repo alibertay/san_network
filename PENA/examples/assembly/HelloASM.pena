@@ -1,0 +1,27 @@
+; PENA Assembly (PASM) example: sum 1..10 and print the result.
+; Deploy it as pena_code (auto-detected as assembly) or with language="asm".
+
+PUSH 0
+SET total
+PUSH 1
+SET n
+
+.loop:
+GET n
+PUSH 11
+LT
+JZ .done
+GET total
+GET n
+ADD
+SET total
+GET n
+PUSH 1
+ADD
+SET n
+JMP .loop
+
+.done:
+GET total
+PRINT
+HALT

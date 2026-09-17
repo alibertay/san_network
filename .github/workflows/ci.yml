@@ -21,7 +21,7 @@ jobs:
       - name: Type check (mypy)
         run: mypy
       - name: Unit tests
-        run: pytest tests/test_units.py
+        run: pytest tests/test_units.py tests/test_asm.py
       - name: Import smoke test
         run: python -c "import app.main; print('import OK')"
 

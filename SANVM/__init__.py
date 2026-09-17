@@ -1,1 +1,1 @@
-"""SANVM: PENA bytecode compiler and stack-based virtual machine."""
+"""SANVM: PENA compiler, PENA Assembly (PASM) assembler and stack-based VM."""

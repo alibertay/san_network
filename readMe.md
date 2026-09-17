@@ -367,6 +367,27 @@ values, lists (`mylist := [1, 2, 3]`) and dictionaries with subscript access
 (`balances[owner]`). See `PENA/PENA_docs.md` for the full guide and
 `PENA/examples/` for runnable contracts (SANRC20, SANRC721, AMM).
 
+Every construct is lowered to **PENA Assembly (PASM)**, the textual
+instruction layer of the SANVM. Contracts can also be written directly in
+assembly, and high-level contracts may embed `asm { ... }` blocks:
+
+```pena
+counter = 0
+
+function bump() {
+  asm {
+    GET counter
+    PUSH 1
+    ADD
+    SET counter
+  }
+}
+```
+
+Deploy raw assembly by sending it as `pena_code` (auto-detected) or with
+`"language": "asm"`. See `PENA/PENA_docs.md` for the mnemonic reference and
+`PENA/examples/assembly/` for runnable examples.
+
 ---
 
 ## 🔎 Light Clients

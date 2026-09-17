@@ -1,0 +1,30 @@
+// High-level PENA with inline assembly: a counter and its running total.
+// The asm { ... } block is assembled in place; its variable macros address
+// the same contract storage that high-level code uses.
+
+counter = 0
+total = 0
+
+function bump() {
+  asm {
+    GET counter
+    PUSH 1
+    ADD
+    SET counter
+
+    GET total
+    GET counter
+    ADD
+    SET total
+  }
+  return counter
+}
+
+function getTotal() {
+  return total
+}
+
+woof bump()
+woof bump()
+woof bump()
+print(getTotal())

@@ -1,0 +1,35 @@
+; Recursive Fibonacci in PENA Assembly.
+; FUNC blocks register contract functions exactly like `function` does in
+; high-level PENA, and CALL_FUNC invokes them through contract storage.
+
+FUNC fib(n) {
+  GET n
+  PUSH 2
+  LT
+  JZ .recurse
+  GET n
+  RET
+
+  .recurse:
+  GET n
+  PUSH 1
+  SUB
+  PUSH fib
+  PUSH 1
+  CALL_FUNC
+  GET n
+  PUSH 2
+  SUB
+  PUSH fib
+  PUSH 1
+  CALL_FUNC
+  ADD
+  RET
+}
+
+PUSH 10
+PUSH fib
+PUSH 1
+CALL_FUNC
+PRINT
+HALT

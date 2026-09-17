@@ -43,7 +43,7 @@ from network.config import (
     same_peer,
 )
 from network.transport import PeerStream
-from SANVM.pena_parser import PenaParser
+from SANVM.pena_parser import compile_pena
 from SANVM.Storage import Storage
 from SANVM.VM import SANVirtualMachine, VMError
 from utils import canonical
@@ -1861,7 +1861,10 @@ class Node:
             command = contract_code.get("command")
             if command == "deploy":
                 if "pena_code" in contract_code:
-                    bytecode = PenaParser().parse(contract_code["pena_code"])
+                    bytecode = compile_pena(
+                        contract_code["pena_code"],
+                        contract_code.get("language"),
+                    )
                     vm.deploy_contract(
                         contract_code["contract_id"], bytecode, gas_limit=gas_limit
                     )
