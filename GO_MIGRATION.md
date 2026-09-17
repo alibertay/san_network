@@ -1,0 +1,111 @@
+# Go Migration
+
+The SAN Network node has a full Go implementation that lives next to the
+Python reference implementation in this repository. The Python code is the
+reference: the Go packages are verified against golden fixtures generated
+*from* Python (`tools/parity_fixtures.py`), and Python stays in the tree for
+cross-checking.
+
+## Phase plan
+
+1. **Foundation** — canonical JSON, post-quantum crypto, addresses,
+   transactions/blocks, merkle proofs, economics and the SANVM. Golden
+   fixtures cover every pure function.
+2. **Persistence and networking** — key-value stores (memory + LMDB),
+   `ChainStore` block/state persistence, the generated gRPC protocol and the
+   node (peers, gossip, consensus, sync).
+3. **Interfaces** — the REST API, the Go SDK and the `sannode` / `sancli` /
+   `sangenesis` commands.
+4. **Packaging and operations** — the cgo LMDB backend (`-tags lmdb`), CI
+   jobs, the Go Docker image and this document.
+
+## Package map
+
+| Python (reference) | Go |
+|--------------------|----|
+| `utils/canonical.py` | `internal/canonical` |
+| `blockchain/crypto.py`, `blockchain/identity.py` | `internal/crypto`, `internal/ledger` |
+| `blockchain/address.py` | `internal/ledger` (`address.go`) |
+| `blockchain/Transaction.py`, `blockchain/Block.py` | `internal/ledger` (`transaction.go`, `block.go`) |
+| `blockchain/Blockchain.py` | `internal/ledger` (`blockchain.go`) |
+| `blockchain/economics.py`, `blockchain/merkle.py` | `internal/ledger` (`economics.go`, `merkle.go`) |
+| `blockchain/persistence.py` | `internal/ledger` (`persistence.go`) |
+| `blockchain/storage/` (base, memory, LMDB) | `internal/ledger/store` |
+| `SANVM/` (VM, assembler, PENA parser, gas, storage) | `internal/sanvm` |
+| `network/config.py`, `network/Node.py`, `network/transport.py` | `internal/netnode` |
+| `network/proto/p2p.proto` | `internal/netproto` (generated) |
+| `app/` (main, routes, limits, metrics) | `internal/api` |
+| `sdk/client.py` | `internal/sdk` |
+| `sdk/cli.py` | `cmd/sancli` |
+| `run.py`, `scripts/run_node.py` | `cmd/sannode` |
+| `scripts/genesis_bootstrap.py` | `cmd/sangenesis` |
+
+## Parity fixtures
+
+`tools/parity_fixtures.py` runs the Python implementation and writes
+`internal/parity/testdata/foundation.json` (canonical encoding and float
+formatting, addresses, merkle/state roots, economics, identities,
+transactions, blocks, chain replay, chain-store round-trips and SANVM
+programs/contracts/errors/asm). The Go tests in `internal/parity` embed the
+file through `parity.Foundation()` and compare Go results against it.
+
+Regenerate the fixture after any intentional Python change (never edit it by
+hand, and never change Python behavior to satisfy Go):
+
+```bash
+python tools/parity_fixtures.py
+go test ./internal/parity/ -count=1
+```
+
+## Build, test and run
+
+```bash
+go build ./...           # cmd/sannode, cmd/sancli, cmd/sangenesis
+gofmt -l .               # must print nothing
+go vet ./...
+go test ./... -count=1   # unit tests + Python-generated parity fixtures
+
+# LMDB backend (cgo; the bundled LMDB only needs a C compiler):
+CGO_ENABLED=1 go build -tags lmdb ./...
+CGO_ENABLED=1 go test -tags lmdb ./internal/ledger/store/ -count=1
+```
+
+The default build has no cgo and therefore no LMDB support: the node falls
+back to the in-memory store. Set `SAN_DB_BACKEND=memory`, or build with
+`-tags lmdb` for persistence. All `SAN_*` variables and port assignments match
+the Python implementation (see `README.md`).
+
+```bash
+# one-command devnet node (port of scripts/run_node.py)
+go run ./cmd/sannode --address 0xYourRewardAddress
+
+# env-configured server (port of run.py), in-memory backend
+SAN_DB_BACKEND=memory go run ./cmd/sannode serve
+
+# wallet/explorer (port of sdk/cli.py)
+go run ./cmd/sancli --rpc http://127.0.0.1:8000 health
+```
+
+## Python cross-check
+
+Python remains runnable and unchanged:
+
+```bash
+python -m pytest tests/test_units.py tests/test_asm.py -q
+python tools/parity_fixtures.py
+```
+
+## Docker and CI
+
+- `Dockerfile` — Python reference image (unchanged).
+- `Dockerfile.go` — executable Go definition of the Go image (distroless
+  static, in-memory backend). The Go toolchain parses every root `*.go` file,
+  so the file prints the Dockerfile instead of being one:
+  `go run Dockerfile.go | docker build -f- -t san-network-go .`.
+- `docker compose --profile go up -d san-node-go` — optional Go node beside
+  the Python one (host ports 18000 / 18765 / 18769 / 18770).
+
+CI (`.github/workflows/ci.yml`) keeps the Python lint/test/smoke jobs and adds
+`go-test` (gofmt, `go vet`, `go test ./...`) and `go-lmdb` (installs
+`build-essential`, then `CGO_ENABLED=1 go build -tags lmdb ./...` and the
+store round-trip test). The `docker` job builds both images.

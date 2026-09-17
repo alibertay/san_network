@@ -232,3 +232,39 @@ Edit the `SAN_*` variables in `docker-compose.yml` (especially
   environment variable is set. The launcher reports this and refuses to run.
 - **Disk growth:** tune `SAN_PRUNE_KEEP` (prunes behind finality) together with
   `SAN_SNAPSHOT_INTERVAL`; pruning only happens when a snapshot anchor exists.
+
+## 10. Go implementation (optional)
+
+The Go port exposes the same `SAN_*` variables, ports and files as the Python
+node, so the configuration above applies unchanged.
+
+```bash
+go build ./...                                          # needs Go 1.26+
+go run ./cmd/sannode --address 0xYourRewardAddress      # = python scripts/run_node.py
+SAN_DB_BACKEND=memory go run ./cmd/sannode serve        # = python run.py
+go run ./cmd/sancli --rpc http://127.0.0.1:8000 health  # = python -m sdk.cli
+```
+
+The default build is cgo-free and only has the in-memory backend; set
+`SAN_DB_BACKEND=memory` or build with LMDB support (the bundled LMDB only
+needs a C compiler):
+
+```bash
+CGO_ENABLED=1 go build -tags lmdb -o sannode ./cmd/sannode
+```
+
+Docker (the Go toolchain parses every root `*.go` file, so `Dockerfile.go`
+prints the Dockerfile that is piped to `docker build`):
+
+```bash
+go run Dockerfile.go | docker build -f- -t san-network-go .
+```
+
+The optional Compose service runs the built image beside the Python node:
+
+```bash
+docker compose --profile go up -d san-node-go   # API on host port 18000
+```
+
+See [GO_MIGRATION.md](GO_MIGRATION.md) for the Python-to-Go package map and
+the parity fixture workflow.

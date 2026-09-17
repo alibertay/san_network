@@ -40,10 +40,64 @@ jobs:
       - name: P0/P1/P2 regression suites
         run: pytest tests/test_smoke.py
 
-  docker:
-    name: Docker build
+  go-test:
+    name: Go format, vet and unit tests
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Build image
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+      - name: Format check (gofmt)
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "These files are not gofmt-clean:"
+            echo "$unformatted"
+            exit 1
+          fi
+      - name: Vet
+        run: go vet ./...
+      - name: Unit tests
+        run: go test ./... -count=1
+
+  go-lmdb:
+    name: Go LMDB backend (cgo)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+      # PowerDNS/lmdb-go compiles its bundled LMDB (mdb.c), so gcc/make from
+      # build-essential is enough; liblmdb-dev is not required.
+      - name: Install C toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential
+      - name: Build with the lmdb tag
+        env:
+          CGO_ENABLED: "1"
+        run: go build -tags lmdb ./...
+      - name: Test the LMDB backend
+        env:
+          CGO_ENABLED: "1"
+        run: go test -tags lmdb ./internal/ledger/store/ -count=1
+
+  docker:
+    name: Docker builds
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+      - name: Build Python image
         run: docker build -t san-network:ci .
+      # Dockerfile.go is executable because the Go toolchain owns the *.go
+      # namespace: it prints the Dockerfile, which is fed to docker via stdin.
+      - name: Build Go image
+        run: go run Dockerfile.go | docker build -f- -t san-network-go:ci .

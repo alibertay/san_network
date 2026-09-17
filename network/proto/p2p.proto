@@ -7,6 +7,8 @@ syntax = "proto3";
 
 package san.p2p;
 
+option go_package = "github.com/alibertay/san_network/internal/netproto;netproto";
+
 service P2P {
   // Persistent bidirectional stream: handshake, gossip, staking/vote gossip,
   // PING/PONG, block/transaction fetch and controller quorum votes all share
