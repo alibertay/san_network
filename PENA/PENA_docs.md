@@ -86,6 +86,30 @@ function add(a, b) {
 ### 📞 Function Calls
 ```pena
 woof add(10, 20)
+print(add(1, 2))    // calls are also allowed inside expressions
+```
+
+### ➗ Operators
+
+```pena
+x = (3 + 5) * 2 - 4 / 2 % 3
+if (a == b && c != d || !flag) {
+  print("picked")
+}
+```
+
+Supported operators: `+ - * / %` (`/` is integer division), `== != < <= > >=`,
+`&& || !`, and unary minus.
+
+### 🔎 Subscripts
+
+```pena
+balances := {}
+balances[owner] = 100
+print(balances[owner])     // missing keys read as 0
+
+mylist := [1, 2, 3]
+print(mylist[1])
 ```
 
 ---
@@ -108,17 +132,17 @@ mydict := {}
 
 | Opcode        | Description                        |
 |---------------|------------------------------------|
-| `PUSH`        | Push value to stack                |
-| `POP`         | Remove top of stack                |
+| `PUSH`, `POP`, `DROP` | Stack handling              |
 | `ADD`, `SUB`, `MUL`, `DIV`, `MOD` | Math ops     |
 | `EQ`, `NEQ`, `LT`, `GT`, `GTE`, `LTE` | Comparison |
-| `SET`, `GET`  | Variable storage access            |
+| `SET`, `GET`, `DELETE`, `HAS` | Variable storage access |
 | `PRINT`       | Output top stack item              |
-| `DEF_FUNC`, `CALL_FUNC`, `RET` | Function handling |
-| `FOR_LOOP`, `CONTINUE_LOOP`, `BREAK_LOOP` | Loops  |
-| `IF`, `JMP`   | Conditional jumps                  |
+| `JMP`, `JZ`, `JNZ` | Jumps (`if`/`while`/`for` compile to these) |
+| `DEF_FUNC`, `CALL_FUNC`, `END_FUNC`, `RET`, `CALL` | Function handling |
 | `LIST_APPEND`, `LIST_REMOVE`, `LIST_LEN`, `LIST_GET` | List ops |
-| `DICT_SET`, `DICT_GET`, `DICT_KEYS` | Dict ops     |
+| `DICT_SET`, `DICT_GET`, `DICT_KEYS` | Dict/subscript ops |
+| `DUP`, `SWAP`, `OVER`, `ROT` | Stack manipulation      |
+| `AND`, `OR`, `XOR`, `NOP`, `HALT` | Logic / control      |
 
 ---
 
@@ -160,9 +184,22 @@ woof greet("Alice")
 ## 🔁 Parsing & Execution Flow
 
 - Source is parsed → tokens extracted
-- AST (abstract syntax tree) constructed
-- Stack-based bytecode emitted via `PenaParser`
-- Bytecode executed by `SANVirtualMachine`
+- Symbols are emitted with symbolic labels; a second pass resolves them to
+  real instruction indices, so jumps always land on valid positions
+- Stack-based bytecode is emitted by `PenaParser`
+- Bytecode is executed by `SANVirtualMachine`, which enforces step (gas),
+  stack and call-depth limits
+
+## 📐 Semantics Notes
+
+- Function parameters are local to the call; every other name reads/writes
+  contract storage.
+- A missing dictionary key reads as `0`, and `0`, `""`, `[]`, `{}` compare
+  equal — contracts use patterns like `if (owner_of[id] == "")` to detect
+  missing entries.
+- All numbers are integers; `/` is integer division, `%` is modulo.
+- Contract calls are atomic: a failing call leaves the previous storage
+  snapshot untouched.
 
 ---
 

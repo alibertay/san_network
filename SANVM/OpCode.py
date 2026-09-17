@@ -1,5 +1,6 @@
 from enum import Enum
 
+
 class OpCode(Enum):
     PUSH = 0x01
     POP = 0x02
@@ -10,7 +11,7 @@ class OpCode(Enum):
     PRINT = 0x07
     MOD = 0x08
     JMP = 0x09
-    IF = 0x0A
+    JZ = 0x10
     DUP = 0x0B
     SWAP = 0x0C
     AND = 0x0D
@@ -39,9 +40,8 @@ class OpCode(Enum):
     DICT_SET = 0x25
     DICT_GET = 0x26
     DICT_KEYS = 0x27
-    FOR_LOOP = 0x28
-    BREAK_LOOP = 0x29
-    CONTINUE_LOOP = 0x2A
     DEF_FUNC = 0x2B
     CALL_FUNC = 0x2C
+    END_FUNC = 0x2D
+    JNZ = 0x2E
     HALT = 0xFF

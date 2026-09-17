@@ -1,0 +1,40 @@
+// SAN Network node-to-node protocol.
+//
+// All consensus payloads travel as JSON envelopes (the exact messages that
+// were previously carried over WebSocket); gRPC is the transport. The REST
+// API remains the public/user-facing interface only.
+syntax = "proto3";
+
+package san.p2p;
+
+service P2P {
+  // Persistent bidirectional stream: handshake, gossip, staking/vote gossip,
+  // PING/PONG, block/transaction fetch and controller quorum votes all share
+  // this session, on any of the node's P2P ports.
+  rpc Session(stream Envelope) returns (stream Envelope);
+
+  // Chain sync: one page of blocks plus a state/storage snapshot.
+  rpc Sync(SyncRequest) returns (SyncResponse);
+
+  // Peer discovery: the seed returns its signed peer records.
+  rpc Bootstrap(Empty) returns (Envelope);
+
+  // Peer status: chain id, genesis fingerprint, height and finality, used to
+  // discover the longest compatible chain before syncing.
+  rpc Status(Empty) returns (Envelope);
+}
+
+message Empty {}
+
+message Envelope {
+  bytes payload = 1;
+}
+
+message SyncRequest {
+  int64 from_index = 1;
+  int32 limit = 2;
+}
+
+message SyncResponse {
+  bytes payload = 1;
+}

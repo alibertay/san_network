@@ -1,24 +1,24 @@
-from VM import SANVirtualMachine
-from Storage import Storage
-from OpCode import OpCode
+import logging
+
+from SANVM.OpCode import OpCode
+from SANVM.Storage import Storage
+
+logger = logging.getLogger(__name__)
+
 
 class ContractManager:
     def __init__(self, storage=None):
         self.storage = storage if storage else Storage()
-
-        if not hasattr(self.storage, "contracts"):
-            if "contracts" not in self.storage.data:
-                self.storage.data["contracts"] = {}
-            self.contracts = self.storage.data["contracts"]
-        else:
-            self.contracts = self.storage.contracts
+        self.contracts = self.storage.contracts
+        self.last_gas_used = 0
+        self.last_logs: list[dict] = []
 
     @staticmethod
     def is_256bit_or_smaller_str(value: str) -> bool:
         # 2^256 = 115792089237316195423570985008687907853269984665640564039457584007913129639936
         max_256_str = "115792089237316195423570985008687907853269984665640564039457584007913129639936"
 
-        trimmed_value = value.lstrip('0')
+        trimmed_value = value.lstrip("0")
 
         if not trimmed_value:
             return True
@@ -30,56 +30,63 @@ class ContractManager:
         else:
             return trimmed_value < max_256_str
 
-    def deploy_contract(self, contract_id, bytecode):
-        is_valid = self.is_256bit_or_smaller_str(contract_id)
+    def deploy_contract(self, contract_id, bytecode, gas_limit=None):
+        # Lazy import: SANVM.VM imports this module at import time.
+        from SANVM.VM import SANVirtualMachine
 
-        if (contract_id in self.contracts) and is_valid:
-            raise ValueError("This contract id already exists")
+        if not isinstance(contract_id, str) or not contract_id:
+            raise ValueError(f"Invalid contract id: {contract_id!r}")
+
+        if not self.is_256bit_or_smaller_str(contract_id):
+            raise ValueError(f"Invalid contract id: {contract_id!r}")
+
+        if contract_id in self.contracts:
+            raise ValueError(f"Contract {contract_id!r} already exists")
+
+        contract_storage = Storage()
+        vm = SANVirtualMachine(storage=contract_storage, gas_limit=gas_limit)
+        # Runs the contract's top-level code and registers its functions.
+        vm.run(list(bytecode))
+        self.last_gas_used = vm.gas_used
+        self.last_logs = list(vm.logs)
 
         self.contracts[contract_id] = {
-            "bytecode": bytecode,
-            "storage": {}
+            "bytecode": list(bytecode),
+            "storage": contract_storage.to_dict(),
         }
+        logger.info("Contract deployed: %s (gas used: %d)", contract_id, vm.gas_used)
 
-    def call_contract_function(self, contract_id, function_name, args):
+    def call_contract_function(self, contract_id, function_name, args, gas_limit=None):
+        # Lazy import: SANVM.VM imports this module at import time.
+        from SANVM.VM import SANVirtualMachine
+
         if contract_id not in self.contracts:
             raise ValueError(f"{contract_id} is not a valid contract")
 
-        contract_info = self.contracts[contract_id]
-        vm = SANVirtualMachine(storage=self._dict_to_storage(contract_info["storage"]))
+        contract = self.contracts[contract_id]
+        contract_bytecode = list(contract["bytecode"])
 
-        temporary_bytecode = list(contract_info["bytecode"])
+        # Each call runs on an isolated copy of the contract storage and is
+        # committed only if it completes successfully (atomic call).
+        contract_storage = Storage.from_dict(contract["storage"])
+        vm = SANVirtualMachine(storage=contract_storage, gas_limit=gas_limit)
 
-        temporary_bytecode.append(OpCode.PUSH.value)
-        temporary_bytecode.append(function_name)
+        call_bytecode = contract_bytecode + [
+            *[item for arg in args for item in (OpCode.PUSH.value, arg)],
+            OpCode.PUSH.value,
+            function_name,
+            OpCode.PUSH.value,
+            len(args),
+            OpCode.CALL_FUNC.value,
+        ]
 
-        param_count = len(args)
-        temporary_bytecode.append(OpCode.PUSH.value)
-        temporary_bytecode.append(param_count)
+        # Start after the contract's top-level code: functions are already
+        # registered in the storage snapshot, top-level init must not re-run.
+        vm.run(call_bytecode, start_pc=len(contract_bytecode))
+        self.last_gas_used = vm.gas_used
+        self.last_logs = list(vm.logs)
 
-        for arg in reversed(args):
-            temporary_bytecode.append(OpCode.PUSH.value)
-            temporary_bytecode.append(arg)
+        return_value = vm.stack[-1] if vm.stack else None
 
-        temporary_bytecode.append(OpCode.CALL_FUNC.value)
-
-        vm.run(temporary_bytecode)
-
-        return_value = None
-        if vm.stack:
-            return_value = vm.stack[-1]
-
-        updated_storage = self._storage_to_dict(vm.storage)
-        self.contracts[contract_id]["storage"] = updated_storage
-
+        contract["storage"] = contract_storage.to_dict()
         return return_value
-
-    def _dict_to_storage(self, data_dict):
-        storage = self.storage
-        for key, val in data_dict.items():
-            storage.set_var(key, val)
-        return storage
-
-    @staticmethod
-    def _storage_to_dict(storage_obj):
-        return dict(storage_obj.data)

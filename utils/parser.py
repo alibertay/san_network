@@ -1,5 +1,6 @@
 from SANVM.OpCode import OpCode
 
+
 class Parser:
     @staticmethod
     def parse_instruction_list(instruction_list):

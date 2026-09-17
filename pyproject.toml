@@ -1,0 +1,24 @@
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+exclude = [".venv", "data", "network/proto/p2p_pb2.py", "network/proto/p2p_pb2.pyi", "network/proto/p2p_pb2_grpc.py"]
+
+[tool.ruff.lint]
+select = ["E9", "F", "I"]
+ignore = ["E501"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["app", "blockchain", "network", "SANVM", "utils"]
+
+[tool.mypy]
+python_version = "3.11"
+ignore_missing_imports = true
+files = ["app", "blockchain", "network", "SANVM", "utils"]
+exclude = ["network/proto/p2p_pb2.py", "network/proto/p2p_pb2.pyi", "network/proto/p2p_pb2_grpc.py"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
+markers = [
+    "slow: end-to-end smoke suites",
+]

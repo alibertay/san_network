@@ -1,0 +1,25 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Node data: databases, lock files, logs and node keys
+data/
+*.db
+*.db-wal
+*.db-shm
+*.kv
+*.kv-lock
+*.log
+*key*.json
+key[0-9]*.json
+k[0-9]*.json
+san_key.json
+devnet-keys/
+
+.DS_Store

@@ -1,0 +1,32 @@
+services:
+  node:
+    build: .
+    image: san-network:local
+    ports:
+      - "8000:8000"   # REST API
+      - "8765:8765"   # gRPC P2P (block gossip + sync)
+      - "8769:8769"   # gRPC P2P (controller votes)
+      - "8770:8770"   # gRPC P2P (peer discovery / gossip)
+    environment:
+      SAN_API_PORT: "8000"
+      SAN_ADVERTISE_HOST: "127.0.0.1"
+      # Persistence + identity live in the volume
+      SAN_DB_PATH: "/data/node.kv"
+      SAN_KEY_FILE: "/data/san_key.json"
+      # Optional: fund an address at genesis, join a seed node
+      SAN_GENESIS_ALLOCATION: "${SAN_GENESIS_ALLOCATION:-}"
+      SAN_BOOTSTRAP: "${SAN_BOOTSTRAP:-}"
+    volumes:
+      - node-data:/data
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/bootstrap', timeout=3)
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+volumes:
+  node-data:

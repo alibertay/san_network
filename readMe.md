@@ -1,92 +1,571 @@
-# 🌐 SAN Network Litepaper
+# 🌐 SAN Network
 
-## 🧭 Introduction
+SAN Network is a decentralized blockchain network with a peer-to-peer (P2P)
+architecture, post-quantum signatures and smart contracts written in the
+high-level **PENA** language.
 
-SAN Network is a decentralized blockchain network designed for secure, scalable, and developer-friendly transaction validation. Operating with a peer-to-peer (P2P) architecture, SAN allows nodes to synchronize, validate transactions, and maintain blockchain integrity — all without centralized control.
-
-> ✨ SAN now supports **smart contracts** written in the developer-friendly, high-level **PENA programming language**.
+> ✨ Smart contracts are compiled to SANVM bytecode and executed deterministically
+> by every node.
 
 ---
 
 ## 🔑 Key Features
 
-- **Post-Quantum Security**: Uses **Dilithium2** cryptographic signatures to future-proof against quantum attacks.
-- **Dynamic Fee Model**: Transaction fees scale with network load.
-- **Decentralized Peer Discovery**: Nodes auto-discover peers and expand organically.
-- **Gossip Protocol**: Maintains network health by removing unresponsive peers.
-- **Smart Contract Support**: Build and deploy contracts in **PENA**, a lightweight high-level language compiled into SANVM bytecode.
+- **Post-Quantum Security**: blocks, transactions, consensus votes and peer
+  records are signed with **ML-DSA-44** (the FIPS 204 standard of
+  CRYSTALS-Dilithium2) via `pqcrypto>=1.0`.
+- **Chain Binding**: every signature names the chain (`SAN_CHAIN_ID`), so
+  transactions, blocks, votes and peer records can never be replayed on
+  another network. The P2P handshake also verifies chain id and protocol
+  version before any other message.
+- **Addresses**: accounts are 20-byte addresses derived from the public key
+  (`0x` + `sha3_256(pubkey)[:20]`); the transaction carries the full public
+  key so signatures stay verifiable.
+- **Deterministic Fee Model**: serialized size is priced per byte and code
+  execution is priced per gas unit (`gas_limit * gas_price` escrowed up front,
+  unused gas refunded). Both prices derive from chain data, so every node
+  computes the same fee.
+- **Gas Metering**: every opcode has a fixed cost; contracts that loop or read
+  state pay for it, and out-of-gas executions are rolled back while the
+  escrow is burned — no free compute.
+- **Mempool Gossip**: accepted transactions propagate to peers over the P2P
+  layer (not just the submitting node's API), with signature/nonce/balance
+  validation on every hop and deduplication by transaction id.
+- **Hardened RPC**: per-IP request rate limiting and request body limits are
+  built in for public nodes.
+- **Integer Money**: balances are integer base units (1 SAN = 10^8 units);
+  no floating point drift.
+- **Replay Protection**: every transaction carries a `nonce` and a `tx_id`;
+  the mempool deduplicates and blocks are applied atomically.
+- **Signed Peer Records**: peer announcements are signed, time bounded and
+  deduplicated; gossip cannot loop, dead peers are evicted after repeated
+  missed health checks, and nodes re-announce themselves so the mesh self-heals.
+- **Controller Quorum**: blocks need ≥66% approval from the deterministic,
+  per-epoch controller set before they are committed and broadcast.
+- **Staking and Validators**: validators bond stake on-chain
+  (`deposit`), can leave the active set (`undelegate`) and withdraw after the
+  unbonding period (`withdraw`). Evidence of double-voting slashes the
+  offender's stake.
+- **Deterministic Proposer**: once a validator set is active, only the
+  stake-weighted, hash-derived proposer for a height may produce its block.
+- **BFT-style Finality**: validators sign `FINALITY_VOTE`s weighted by stake;
+  a block with ≥2/3 of the active stake is finalized and finalized history can
+  never be reorganized away.
+- **Committed State**: every block header carries a `tx_root` (Merkle over the
+  transactions) and a `state_root` (Merkle over accounts, validator stakes and
+  contract code/storage); nodes recompute both and reject mismatches.
+- **Light Clients**: `/headers` serves the header chain, `/proof/account` and
+  `/proof/tx` serve Merkle inclusion proofs that verify against those roots.
+- **Snapshots and Pruning**: state snapshots are stored at a configurable
+  interval (verifiable against the header) and old block bodies can be pruned
+  from the database behind the finality checkpoint.
+- **Fee Market**: a per-gas base fee is burned and adjusts with block load
+  (EIP-1559 style); only the tip goes to the validator.
+- **Receipts**: every execution produces a receipt with status, gas used and
+  contract logs (`print` in PENA emits events).
+- **On-chain Governance**: consensus parameters (min stake, unbonding period,
+  slash share, block gas limit) are chain state and change only with 2/3
+  validator-approved `set_param` transactions.
+- **SDK and CLI**: `sdk/client.py` and `python -m sdk.cli` cover balances,
+  transfers, staking, contracts, proofs and governance.
+- **Metrics**: dependency-free Prometheus text exposition at `/metrics`.
+- **Chain Database**: a namespaced key-value store (LMDB; in-memory backend for
+  tests) with column-family style prefixes, indexes for height, transactions
+  and receipts, and **atomic per-block commits** — a crash can never leave a
+  half-written block behind.
+- **Fork Choice**: competing branches are buffered as orphans and the node
+  reorgs to the longest fully verified chain (bounded by `SAN_MAX_REORG_DEPTH`),
+  returning reorged-out transactions to the mempool.
+- **Persistence**: set `SAN_DB_PATH` and the whole chain, ledger state and
+  contract storage survive restarts (LMDB file).
+- **Optional TLS**: run the P2P listeners and API over `wss`/`https` by
+  providing a certificate; plain `ws`/`http` is only for development.
+- **Smart Contracts**: build and deploy contracts in PENA (see
+  `PENA/PENA_docs.md`).
 
 ---
 
-## 🧱 Blockchain Architecture
+## 🚀 Quick Start
 
-### 🔗 Blockchain
+The fastest path is the one-command launcher (see [INSTALL.md](INSTALL.md)):
 
-- Immutable and verifiable chain of blocks.
-- Starts with a **Genesis Block**.
-- Each block includes:
-  - **Index**
-  - **Previous Block Hash**
-  - **Validator & Signature** (Dilithium2)
-  - **Transactions**
-  - **Optional Smart Contract Execution Results**
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
 
-### 💸 Transactions
+# founder: new chain, premine + auto-stake, rewards to your address
+python scripts/run_node.py --address 0xYourRewardAddress
+```
 
-- All transactions are signed using **Dilithium2**.
-- **Dynamic Fees**:
-  - Min: `0.01 SAN` per byte.
-  - Max: `0.1 SAN` per byte (under high congestion).
-- Signature verification is mandatory before mempool acceptance.
+Manual setup (same result, more knobs):
 
-### 🖧 Nodes
+```bash
+# 1. Create a persistent node key
+python -m blockchain.identity -o san_key.json
 
-Every SAN node performs:
+# 2. Fund the node at genesis (SAN units)
+PUBLIC_KEY=$(python -c "from blockchain.identity import NodeIdentity; print(NodeIdentity.from_file('san_key.json').public_key_hex)")
+export SAN_KEY_FILE=san_key.json
+export SAN_DB_PATH=data/node.kv
+export SAN_GENESIS_ALLOCATION="$PUBLIC_KEY:1000000"
 
-- **Peer Discovery** via bootstrap servers.
-- **Transaction Processing** & broadcasting.
-- **Block Validation**: Each validator signs and verifies blocks.
-- **Gossip Updates**: Share block/state info with peers.
-- **Smart Contract Execution** via SANVM + PENA bytecode.
+# 3. Run (single worker!)
+python run.py
+```
+
+Join an existing network by pointing at a seed's REST endpoint:
+
+```bash
+export SAN_BOOTSTRAP=127.0.0.1:8000   # host:api_port of any node
+python run.py
+```
+
+For multi-node genesis orchestration use `scripts/genesis_bootstrap.py`; for a
+joiner that fetches and verifies the seed's genesis automatically use
+`scripts/run_node.py --bootstrap ... --expect-genesis-hash ...`.
 
 ---
 
-## 🔁 Consensus and Block Creation
+## ⚙️ Configuration
 
-- New block creation is triggered when mempool fees ≥ **500 SAN**.
-- Validator signs the block.
-- **66% consensus** required from controller nodes.
-- Finalized blocks are broadcast to the network.
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `SAN_CHAIN_ID` | `san-devnet-1` | Chain identity; signatures are bound to it |
+| `SAN_HOST` | `0.0.0.0` | Listener bind address |
+| `SAN_API_PORT` | `8000` | REST API port |
+| `SAN_P2P_PORT` | `8765` | Block broadcast port |
+| `SAN_PEER_PORT` | `8770` | Peer discovery / gossip / PING-PONG port |
+| `SAN_CONTROLLER_PORT` | `8769` | Controller vote port |
+| `SAN_ADVERTISE_HOST` | local IP | Host announced to peers |
+| `SAN_BOOTSTRAP` | – | Seed node `host:api_port` |
+| `SAN_KEY_FILE` | – | Node key file (JSON, 0600) |
+| `SAN_DB_PATH` | – | Database file (LMDB); unset = in-memory only |
+| `SAN_DB_BACKEND` | `lmdb` | `lmdb` or `memory` |
+| `SAN_SYNC_BATCH` | `128` | Blocks per sync page |
+| `SAN_SYNC_MAX_BLOCKS` | `50000` | Max blocks per sync session |
+| `SAN_GENESIS_ALLOCATION` | – | `address:amount[,address:amount]` (address or public key) |
+| `SAN_CONTROLLER_COUNT` | `10` | Controllers asked per block |
+| `SAN_CONTROLLER_MIN_STAKE` | `0` | Balance (SAN) required to be a controller |
+| `SAN_EPOCH_LENGTH` | `100` | Blocks per controller-selection epoch |
+| `SAN_BLOCK_THRESHOLD_FEE` | `500` | Mempool fees that trigger block production (SAN) |
+| `SAN_BLOCK_GAS_LIMIT` | `30000000` | Max total gas per block |
+| `SAN_MIN_VALIDATOR_STAKE` | `1000` | Minimum stake to be an active validator (SAN) |
+| `SAN_UNBONDING_PERIOD` | `100` | Blocks between `undelegate` and `withdraw` |
+| `SAN_SLASH_BPS` | `5000` | Share of stake burned on proven equivocation (basis points) |
+| `SAN_RPC_RATE_LIMIT` / `SAN_RPC_RATE_WINDOW` | `120` / `10` | Per-IP request limit |
+| `SAN_RPC_MAX_BODY` | `1048576` | Max request body (bytes) |
+| `SAN_SNAPSHOT_INTERVAL` | `1000` | Blocks between state snapshots (0 disables) |
+| `SAN_PRUNE_KEEP` | `0` | Prune DB blocks older than this behind finality (0 keeps all) |
+| `SAN_MAX_PEERS` | `64` | Peer limit |
+| `SAN_PEER_TTL` | `300` | Peer record freshness window (s) |
+| `SAN_PEER_MISS_THRESHOLD` | `2` | Failed health checks before eviction |
+| `SAN_MAX_ORPHANS` | `64` | Buffered fork blocks |
+| `SAN_MAX_REORG_DEPTH` | `64` | How far back a reorg may go |
+| `SAN_BLOCK_GOSSIP` | `true` | Re-broadcast accepted blocks |
+| `SAN_PEER_RATE_LIMIT` / `SAN_PEER_RATE_WINDOW` | `60` / `10` | Per-connection message limit |
+| `SAN_WS_MAX_SIZE` | `1048576` | Max P2P message size (bytes) |
+| `SAN_REQUIRE_BLOCK_SIGNATURE` | `true` | Reject unsigned blocks and peer records |
+| `SAN_TLS_CERT` / `SAN_TLS_KEY` / `SAN_TLS_CA` | – | Enable TLS / verify peers |
+| `SAN_PEER_CHECK_INTERVAL` | `30` | Peer health loop interval (s) |
+| `PRIVATE_KEY` / `PUBLIC_KEY` | – | Hex keys (development; prefer `SAN_KEY_FILE`) |
 
 ---
 
-## 🔌 Network Communication
+## 🔌 REST API
 
-Uses **FastAPI** for REST + **WebSockets** for P2P events.
+- `GET /health` → chain id, height, tip hash, peer/controller/mempool counters
+- `GET /account/{address}` → balance (`SAN` + base units) and nonce
+- `GET /block/{index}` → block payload
+- `GET /mempool` → pending transaction ids
+- `GET /contracts` → deployed contract ids
+- `POST /contract/query` → read-only contract call (`{contract_id, function_name, params}`)
+- `GET /validators` → active validator set with stake weights
+- `GET /finality` → finalized height/hash and pending vote heights
+- `GET /evidence` → collected equivocation evidence
+- `GET /headers?from_index=&limit=` → header chain (no transactions)
+- `GET /proof/account/{address}` → account Merkle proof vs the state root
+- `GET /proof/tx/{block_index}/{tx_index}` → transaction Merkle proof vs `tx_root`
+- `GET /snapshot` → latest finalized state snapshot
+- `GET /receipt/{block_index}/{tx_index}` → execution receipt (status, gas, logs)
+- `GET /receipt/tx/{tx_id}` → receipt by transaction id
+- `GET /tx/{tx_id}` → transaction, its block and receipt (tx index)
+- `GET /metrics` → Prometheus text metrics
+- `GET /bootstrap` → known peers plus this node's own signed record
+- `GET /sync?from_index=N&limit=M` → one page of blocks plus a snapshot; follow `has_more` / `next_from_index`
+- `POST /transaction` → submit a signed transaction (JSON body)
+- `POST /join` → discover peers from `SAN_BOOTSTRAP` and register
 
-### 🔹 REST API Endpoints
+### Submitting a transaction
 
-- `POST /sync` → Blockchain sync  
-- `POST /transaction` → Submit new TX  
-- `GET /bootstrap` → Get known peers  
-- `POST /join` → Join the network
+```python
+import requests
+from blockchain.address import address_from_public_key
+from blockchain.identity import NodeIdentity
+from blockchain.Transaction import Transaction
 
-### 🔸 WebSocket Protocol
+identity = NodeIdentity.from_file("san_key.json")
+payload = {
+    "chain_id": "san-devnet-1",          # must match the node's SAN_CHAIN_ID
+    "sender": identity.public_key_hex,   # full public key (signature check)
+    "nonce": 0,                          # next expected nonce for the address
+    "receiver": "0x" + "ab" * 20,        # account address
+    "value": 10,                         # SAN; up to 8 decimals
+}
+payload["signature"] = Transaction.sign_payload(payload, identity.private_key)
 
-- `PING/PONG` → Peer health check  
-- `GOSSIP` → Propagate new blocks and peer status  
-- `CONTRACT_EXEC` → Broadcast smart contract invocation results  
+print("sender address:", address_from_public_key(identity.public_key))
+print(requests.post("http://127.0.0.1:8000/transaction", json=payload).json())
+```
+
+Response statuses: `pooled` (waiting for the fee threshold), `committed`
+(block produced, approved and applied), `rejected` (no controller quorum).
+
+The node recomputes the `fee` itself; `signature` and `fee` are protocol
+metadata and are excluded from the signed message.
+
+### Transactions that execute code
+
+Deploying or calling a contract needs gas fields (plain transfers must not set
+them):
+
+```python
+payload = {
+    "chain_id": "san-devnet-1",
+    "sender": identity.public_key_hex,
+    "nonce": 1,
+    "gas_limit": 1_000_000,   # max gas units
+    "gas_price": 1,           # base units per gas (minimum 1)
+    "contract_code": {
+        "command": "deploy",
+        "contract_id": "kv",
+        "pena_code": "value = 1\nfunction get() {\n return value\n}\n",
+    },
+}
+payload["signature"] = Transaction.sign_payload(payload, identity.private_key)
+```
+
+The fee is `size_fee + gas_limit * gas_price`, charged up front; unused gas is
+refunded after execution. If the code runs out of gas, the escrow is burned
+and all state changes from that transaction are rolled back.
+
+### Staking
+
+Validator commands are normal signed transactions (no gas fields, no value):
+
+```python
+signed_transaction(          # bond stake and join the active set
+    {"validator": {"command": "deposit", "amount": 500_00000000}},
+)
+signed_transaction({"validator": {"command": "undelegate"}})   # leave at once, stake unlocks later
+signed_transaction({"validator": {"command": "withdraw"}})     # after the unbonding period
+signed_transaction(          # slashing evidence: two signed votes, same height, different hashes
+    {"validator": {"command": "evidence", "vote_a": vote_a, "vote_b": vote_b}},
+)
+```
+
+### Governance
+
+Consensus parameters live in the chain state and only change with a
+`set_param` transaction approved by ≥2/3 of the active stake (approvals are
+signed over chain id + parameter + the transaction's sender/nonce, so they
+cannot be replayed):
+
+```python
+nonce = client.nonce()
+approval = client.governance_approval("unbonding_period", 7, nonce=nonce)
+client.governance_set_param("unbonding_period", 7, [approval], nonce=nonce)
+```
+
+Governable parameters: `min_validator_stake`, `unbonding_period`, `slash_bps`,
+`block_gas_limit`, `proposer_timeout_ms`, `block_reward`.
+
+---
+
+## 🔸 Node-to-Node Protocol (gRPC)
+
+Nodes talk to each other over **gRPC**; the REST API is only for users and
+clients. One service (`network/proto/p2p.proto`) is bound to every P2P port:
+
+| RPC | Purpose |
+|-----|---------|
+| `Session` (bidirectional stream) | Handshake, gossip, votes, requests |
+| `Sync` | Paged chain synchronization |
+| `Bootstrap` | Peer discovery from a seed |
+
+Inside a `Session`, all messages are JSON objects with a `type` field. Every
+connection starts with a signed handshake — `HELLO` (initiator) /
+`HELLO_ACK` (responder) — carrying the protocol version, chain id, public key
+and timestamp. Messages on a mismatched chain or protocol version are rejected
+before anything else.
+
+| Port | Message | Purpose |
+|------|---------|---------|
+| peer | `HELLO` / `HELLO_ACK` | Protocol + chain handshake |
+| peer | `PING` / `PONG` | Health check |
+| peer | `PEER_UPDATE` | Announce a signed peer record |
+| peer | `DEAD_PEER` | Peer removal gossip |
+| peer | `GET_PEERS` / `PEERS` | Peer list exchange |
+| peer | `TX` | Mempool gossip |
+| peer | `GET_TXS` / `TXS` | Mempool pull (restarts, joins) |
+| p2p | `GET_BLOCK` / `BLOCK_NOT_FOUND` | Fetch a missing block (orphan parents) |
+| p2p | `BLOCK` | Broadcast an approved block |
+| controller | `BLOCK_VOTE_REQUEST` / `BLOCK_VOTE_RESPONSE` | Signed consensus vote |
+
+Peer sessions are rate limited (`SAN_PEER_RATE_LIMIT`) and capped at
+`SAN_WS_MAX_SIZE` bytes per message. TLS verifies peer certificates against
+`SAN_TLS_CA` (or the system trust store), so self-signed deployments must set
+`SAN_TLS_CA`.
+
+---
+
+## 🔁 Consensus and Fees
+
+1. Transactions enter the mempool after signature, nonce and balance checks.
+2. When pooled fees reach `SAN_BLOCK_THRESHOLD_FEE`, the node builds a block.
+3. Controller nodes (deterministic per epoch, optionally stake-gated) verify
+   the block and return **signed votes**.
+4. With ≥66% approval the block is committed atomically (balances, nonces,
+   contract execution) and broadcast. Otherwise it is dropped untouched.
+
+Fees are charged per serialized byte and per gas unit
+(`0.01`–`0.1 SAN/byte` plus `gas_used * gas_price`). The per-byte rate scales
+with the parent block's load, so the same block always costs the same on
+every node. A per-gas **base fee** (starting at 1, adjusting up to ±12.5% per
+block as blocks fill) is **burned**; the rest of `gas_price` is the validator's
+tip. Blocks are capped by the chain's `block_gas_limit` parameter.
+
+When validators are staked, the proposer for each height is derived from the
+chain id, height and active set; controllers still pre-commit the block, and
+validators then sign stake-weighted finality votes. With ≥2/3 of the active
+stake voting for a block it becomes **finalized**: reorgs that would rewrite
+finalized history are rejected, which turns finality from probabilistic
+(longest chain) into an explicit checkpoint.
+
+If two nodes produce competing blocks, the tie is temporary: blocks are
+gossiped to every peer, branches are assembled from the orphan buffer, and the
+node switches to the longest **fully verified** chain (state and contract
+storage are rebuilt by replaying it). Transactions from the reorged-out branch
+return to the mempool automatically.
 
 ---
 
 ## 🔤 Smart Contracts with PENA
 
-SAN supports high-level **PENA** language for smart contract development.
-
-### ✍️ Example
-
 ```pena
-function transferTokens(to, amount) {
-  // token logic here
-  print("Sending tokens to " + to)
+function greet(name) {
+  print("Hello " + name)
 }
+
+woof greet("Alice")
+```
+
+PENA supports: variables, strings, arithmetic (`+ - * / %`), comparisons
+(`== != < <= > >=`), logic (`&& || !`), `if / else if / else`, `while`,
+`for i, a -> b`, `break` / `continue`, functions with parameters and return
+values, lists (`mylist := [1, 2, 3]`) and dictionaries with subscript access
+(`balances[owner]`). See `PENA/PENA_docs.md` for the full guide and
+`PENA/examples/` for runnable contracts (SANRC20, SANRC721, AMM).
+
+---
+
+## 🔎 Light Clients
+
+A light client only follows headers and verifies what it needs:
+
+```python
+from blockchain.merkle import verify_merkle_proof
+import requests
+
+base = "http://127.0.0.1:8000"
+headers = requests.get(f"{base}/headers", params={"from_index": 0, "limit": 10}).json()["headers"]
+tip_root = headers[-1]["state_root"]
+
+proof = requests.get(f"{base}/proof/account/{address}").json()
+assert proof["root"] == tip_root
+assert verify_merkle_proof(proof["root"], proof["leaf"], proof["proof"], proof["index"])
+```
+
+The same pattern works for transactions with `/proof/tx`, and `/snapshot`
+returns a finalized state snapshot whose `state` verifies against the
+`state_root` of the header at that height.
+
+---
+
+## 🗄️ Storage Architecture
+
+The chain database mirrors what production clients do (geth's Pebble/LevelDB
+layout, Bitcoin's block index):
+
+| Namespace | Purpose |
+|-----------|---------|
+| `m:` | metadata (schema version, finalized checkpoint, genesis fingerprint) |
+| `h:` / `b:` | block header and body, keyed by block hash |
+| `n:<height>` | canonical height → hash index |
+| `r:` | execution receipts keyed by block hash |
+| `t:<tx_id>` | transaction index → block, position |
+| `S:` | ledger state and contract storage snapshots |
+| `k:<height>` | finalized state checkpoints |
+
+Every block commit writes the header, body, canonical index, receipts,
+transaction index and the resulting ledger state in **one atomic batch**
+(`ChainStore.append_block`), so restarting always resumes at a consistent
+height. `SAN_PRUNE_KEEP` prunes old namespaces behind the finality checkpoint,
+keeping the newest snapshot as an anchor; a pruned node restarts from that
+anchor and replays the remaining window. Schema versions are checked on open.
+
+---
+
+## 🪙 Block Rewards
+
+`SAN_BLOCK_REWARD` (SAN per block, default 0) is a genesis consensus
+parameter: when non-zero, the expected proposer keeps producing empty blocks
+so validators earn a subsidy even without traffic. Tips and the subsidy are
+credited to the address declared in the signed block header, which is set from
+`SAN_REWARD_ADDRESS` (or the proposer's own address when unset). Set it in
+genesis; every node then credits the same destination.
+
+---
+
+## 🚀 One-Command Node
+
+`scripts/run_node.py` creates or joins a devnet and pays every block reward and
+transaction tip to the address you choose. On startup the node **discovers its
+peers, finds the longest compatible chain, verifies and replays it, then starts
+working** — no manual configuration. A step-by-step setup guide lives in
+[INSTALL.md](INSTALL.md).
+
+```bash
+# founder: brand-new chain, premine + auto-stake, rewards to 0x...
+python scripts/run_node.py --address 0xYourRewardAddress
+
+# joiner: fetch genesis from the seed, pin it, discover + sync + run
+python scripts/run_node.py --address 0xYourRewardAddress \
+    --bootstrap 127.0.0.1:8000 --expect-genesis-hash <genesis-hash>
+```
+
+Startup flow (all automatic):
+
+1. **Discovery** — asks the seed (`SAN_BOOTSTRAP`) over gRPC `Bootstrap`
+   (REST `/bootstrap` fallback) for signed peer records.
+2. **Longest chain** — asks every peer for its `Status` (chain id, genesis
+   fingerprint, height, finality), rejects incompatible chains and picks the
+   highest one.
+3. **Sync** — pages blocks (`Sync`, 512 at a time) from that peer, verifies
+   each one (hash, signature, state root, transactions) and rebuilds the
+   ledger by replaying them; a peer snapshot is never trusted.
+4. **Work** — gossip, votes, mempool exchange, block production when this node
+   is the expected proposer, finality votes.
+5. **Rewards** — the block subsidy (`SAN_BLOCK_REWARD`) and tips are credited
+   to the `reward_address` declared in the signed block header.
+
+Useful flags: `--stake 0` (observer only), `--stake 1000` (deposit, default),
+`--block-reward 2` (founder only), `--key node_key.json`,
+`--api-port 8000`, `--db data/node.kv`. In joiner mode the seed's `/genesis`
+endpoint supplies the immutable allocation and consensus parameters so the
+local genesis hash matches exactly, and the launcher verifies it before
+staking.
+
+---
+
+## 🛠️ SDK and CLI
+
+```python
+from blockchain.identity import NodeIdentity
+from sdk import SanClient
+
+client = SanClient("http://127.0.0.1:8000", NodeIdentity.from_file("san_key.json"))
+print(client.transfer("0x" + "ab" * 20, 5))            # auto nonce + signing
+client.deposit_stake(500)                               # become a validator
+client.deploy_contract("kv", "value = 1\nfunction get() { return value }")
+print(client.contract_query("kv", "get"))               # read-only call
+print(client.validators()["parameters"])                # chain parameters
+print(client.receipt(3, 0))                             # status, gas, logs
+```
+
+```bash
+python -m sdk.cli --rpc http://127.0.0.1:8000 health
+python -m sdk.cli --rpc http://127.0.0.1:8000 balance --address 0x...
+python -m sdk.cli --rpc http://127.0.0.1:8000 --key san_key.json send --to 0x... --value 5
+python -m sdk.cli --rpc http://127.0.0.1:8000 --key san_key.json deploy --id kv --file kv.pena
+python -m sdk.cli --rpc http://127.0.0.1:8000 query --id kv --function get
+```
+
+## 🌐 Run a Local Testnet
+
+A brand-new chain starts with **no coins at all**: the genesis allocation *is*
+the premine. Keys must exist **before** the chain does, because a node that
+auto-generates its key at startup gets a random key that cannot be premined.
+
+```bash
+# 1) generate node identities FIRST and print the shared genesis commands
+python scripts/genesis_bootstrap.py --count 2 --dir devnet-keys --write-env
+```
+
+The helper prints (and writes to `devnet-keys/nodeN.env`) the exact start
+command for each node: `keyN.json`, `nodeN.kv` (LMDB) and the shared
+`SAN_GENESIS_ALLOCATION="<pubkey1>:1000000,<pubkey2>:1000000"` string. Every
+node must use the same `SAN_CHAIN_ID` and the same allocation (it defines
+genesis; a mismatch is refused at startup).
+
+```bash
+# 2) start the seed (node 1) and the joiner (node 2), from the printed commands
+env $(cat devnet-keys/node1.env) python run.py &
+env $(cat devnet-keys/node2.env) python run.py &
+```
+
+While no validator is staked the chain still runs in bootstrap mode (any
+funded node can propose; blocks are accepted locally with no controller
+quorum), but **finality does not advance**. Activate validators from the
+premined accounts:
+
+```bash
+# 3) stake >= SAN_MIN_VALIDATOR_STAKE (default 1000 SAN) on each node
+python -m sdk.cli --rpc http://127.0.0.1:8000 --key devnet-keys/key1.json stake --amount 1000
+python -m sdk.cli --rpc http://127.0.0.1:8001 --key devnet-keys/key2.json stake --amount 1000
+```
+
+Once at least one validator is active, proposer rotation and `/finality`
+start working. To hand coins to a user who joins later, send them a transfer
+from a premined account (`sdk.cli send --to 0x... --value 10`) — the genesis
+allocation itself cannot be changed after the chain starts.
+
+
+---
+
+## 🧪 Tests
+
+```bash
+pip install -r requirements-dev.txt
+ruff check .
+mypy
+pytest                        # 77 tests: unit + storage + 9 live suites
+python tests/smoke_p0.py      # API + basic P2P flow
+python tests/smoke_p1.py      # money, VM/PENA, contracts, block validation
+python tests/smoke_p2.py      # identity, peer security, TLS, persistence
+python tests/e2e_network.py         # three real uvicorn nodes + restart catch-up
+python tests/stress_consistency.py  # randomized workload + money conservation
+```
+
+---
+
+## 🔐 Security Notes
+
+- Prefer `SAN_KEY_FILE` over environment keys; the file is written with `0600`.
+- Set a distinct `SAN_CHAIN_ID` per network: signatures are bound to it, so a
+  testnet transaction is invalid on mainnet (and vice versa).
+- Run the API with **exactly one worker** (`run.py` enforces this): the chain
+  lives in-process. Scale with more nodes, not more workers.
+- Enable TLS in production and point peers at your CA with `SAN_TLS_CA`.
+- Public nodes should keep RPC limits enabled (`SAN_RPC_RATE_LIMIT`,
+  `SAN_RPC_MAX_BODY`) and be fronted by a reverse proxy for coarse filtering.
+- Sync replays and verifies every block locally; ledger state and contract
+  storage are derived, never trusted from a peer snapshot (a peer can withhold
+  blocks, but cannot inject state).
+- `SAN_PRUNE_KEEP` prunes block bodies behind finality and keeps the newest
+  snapshot as the restart anchor; after a restart the node loads that window
+  and replays it (state is verified against the snapshot root). While running,
+  the node keeps the window it loaded, not the whole history.
+- Controller eligibility without stake is sybil-prone; in open networks set
+  `SAN_CONTROLLER_MIN_STAKE` and use the validator staking commands plus
+  finality for real economic security.
