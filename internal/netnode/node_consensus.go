@@ -552,6 +552,7 @@ func (n *Node) SubmitTransaction(payload map[string]any) (map[string]any, error)
 
 	if committedBlock != nil {
 		n.maybeVote(committedBlock)
+		n.gossipBlock(committedBlock)
 	}
 	n.gossipTransaction(transaction)
 	return result, nil

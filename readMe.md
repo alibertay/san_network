@@ -125,6 +125,35 @@ For multi-node genesis orchestration use `scripts/genesis_bootstrap.py`; for a
 joiner that fetches and verifies the seed's genesis automatically use
 `scripts/run_node.py --bootstrap ... --expect-genesis-hash ...`.
 
+### Start your Go node
+
+A complete Go implementation lives beside the Python one. One command builds
+`bin/sannode` / `bin/sancli`, creates the node key on first run and keeps the
+wallet's on-chain stake in sync:
+
+```bash
+# start with your wallet (a fresh key file is created on first run; the script
+# prints its address, use that as --wallet from then on)
+python scripts/go_node.py --wallet 0xYourAddress
+
+# same, and reconcile the on-chain stake to exactly 100 SAN
+python scripts/go_node.py --wallet 0xYourAddress --stake 100
+
+python scripts/go_node.py --status
+python scripts/go_node.py --stop
+```
+
+Defaults: data dir `data/go-node`, API/P2P/peer/controller ports
+8000/8765/8770/8769, in-memory database, unbonding 0, min stake 0, block reward
+2 SAN and a 10 000 SAN dev genesis allocation for the wallet. Pass
+`--bootstrap host:api_port` to join a seed instead of founding a chain, and
+`--genesis-alloc ADDRESS:SAN` to fund other devnet wallets. Staking is signed
+by the node key, so `--wallet` must be the key file address (on mismatch the
+script shows the correct address). `tools/go_e2e_check.py` is a test-only
+3-node verification (transfers, SANRC20, custom contract, 0→100→70 stake); it
+is not required to run a node. See [GO_MIGRATION.md](GO_MIGRATION.md) for
+details.
+
 ---
 
 ## ⚙️ Configuration

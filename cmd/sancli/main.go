@@ -42,13 +42,13 @@ func (list *stringList) Set(value string) error {
 }
 
 const usageText = `usage: sancli [-h] [--rpc RPC] [--key KEY] [--timeout TIMEOUT]
-              {health,validators,finality,metrics,balance,send,stake,undelegate,withdraw,deploy,call,query,gov,proof,receipt,tx}
+              {health,validators,finality,metrics,balance,send,stake,undelegate,withdraw,deploy,call,query,gov,proof,receipt,tx,wallet}
               ...
 
 SAN Network wallet
 
 positional arguments:
-  {health,validators,finality,metrics,balance,send,stake,undelegate,withdraw,deploy,call,query,gov,proof,receipt,tx}
+  {health,validators,finality,metrics,balance,send,stake,undelegate,withdraw,deploy,call,query,gov,proof,receipt,tx,wallet}
 
 options:
   -h, --help         show this help message and exit
@@ -260,6 +260,8 @@ func run(argv []string, stdout, stderr io.Writer) int {
 			return reportError(stderr, err)
 		}
 		output = value
+	case "wallet":
+		return runWallet(commandArgs, options.key, stdout, stderr)
 	default:
 		fmt.Fprintf(stderr, "sancli: unknown command: %s\n", command)
 		return 2

@@ -355,17 +355,37 @@ func OpenSession(ctx context.Context, node NodeTransport, peer map[string]any, p
 	peerStream := newPeerStream(inbound, outbound, address)
 
 	senderErr := make(chan error, 1)
+	senderDone := make(chan struct{})
+	reportSender := func(err error) {
+		select {
+		case senderErr <- err:
+		default:
+		}
+	}
 	go func() {
+		defer close(senderDone)
 		for {
 			select {
 			case message := <-outbound:
 				if err := stream.Send(&netproto.Envelope{Payload: []byte(message)}); err != nil {
-					senderErr <- err
+					reportSender(err)
 					return
 				}
 			case <-peerStream.Done():
-				senderErr <- nil
-				return
+				// Flush messages queued before the close so a one-shot
+				// session never drops its last message on the floor.
+				for {
+					select {
+					case message := <-outbound:
+						if err := stream.Send(&netproto.Envelope{Payload: []byte(message)}); err != nil {
+							reportSender(err)
+							return
+						}
+					default:
+						reportSender(nil)
+						return
+					}
+				}
 			}
 		}
 	}()
@@ -389,6 +409,10 @@ func OpenSession(ctx context.Context, node NodeTransport, peer map[string]any, p
 	}()
 
 	peerStream.closeCallback = func() {
+		// Wait for the queued messages to reach gRPC before tearing the
+		// connection down (a plain connection.Close() races the sender).
+		<-senderDone
+		_ = stream.CloseSend()
 		connection.Close()
 	}
 

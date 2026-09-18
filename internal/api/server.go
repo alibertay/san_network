@@ -60,6 +60,7 @@ func (s *Server) register(mux *http.ServeMux) {
 
 	mux.HandleFunc("GET /account/{address}", s.handleAccount)
 	mux.HandleFunc("GET /block/{index}", s.handleBlock)
+	s.registerStakeRoutes(mux)
 	mux.HandleFunc("GET /mempool", s.handleMempool)
 	mux.HandleFunc("GET /contracts", s.handleContracts)
 	mux.HandleFunc("POST /contract/query", s.handleContractQuery)

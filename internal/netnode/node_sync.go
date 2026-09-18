@@ -284,15 +284,36 @@ func (n *Node) requestBlock(ctx context.Context, blockHash string) bool {
 		n.requestedBlocks = map[string]struct{}{}
 	}
 	n.requestedBlocks[blockHash] = struct{}{}
-	peer := n.outgoingNode
-	if peer == nil && len(n.PEERS) > 0 {
-		peer = n.PEERS[0]
+	peers := append([]map[string]any{}, n.PEERS...)
+	if n.outgoingNode != nil {
+		peers = append([]map[string]any{n.outgoingNode}, peers...)
 	}
 	n.mu.Unlock()
-	if peer == nil {
-		return false
-	}
 
+	seen := map[string]struct{}{}
+	fetched := false
+	for _, peer := range peers {
+		label := PeerLabel(peer)
+		if _, duplicate := seen[label]; duplicate {
+			continue
+		}
+		seen[label] = struct{}{}
+		if n.fetchBlock(ctx, peer, blockHash) {
+			fetched = true
+			break
+		}
+	}
+	if !fetched {
+		// Allow a later gossip message to retry with a different peer.
+		n.mu.Lock()
+		delete(n.requestedBlocks, blockHash)
+		n.mu.Unlock()
+	}
+	return fetched
+}
+
+// fetchBlock requests one block body from one peer and tries to connect it.
+func (n *Node) fetchBlock(ctx context.Context, peer map[string]any, blockHash string) bool {
 	stream, err := OpenSession(ctx, n, peer, "p2p_port", n.sessionTimeout())
 	if err != nil {
 		log.Printf("Block request for %.12s failed: %v", blockHash, err)
@@ -468,7 +489,9 @@ func (n *Node) handleIncomingBlock(ctx context.Context, data map[string]any) {
 	n.mu.Unlock()
 
 	if shouldSync {
-		n.Synchronize(ctx)
+		// One-shot gossip sessions are canceled as soon as the sender closes
+		// them, so follow-up networking must not inherit this context.
+		n.Synchronize(context.Background())
 	}
 	if accepted && n.config.BlockGossip {
 		n.gossipBlock(block)
@@ -483,7 +506,7 @@ func (n *Node) handleIncomingBlock(ctx context.Context, data map[string]any) {
 		_, parentOrphan := n.orphans[block.PreviousBlockHash]
 		n.mu.Unlock()
 		if !parentOnChain && !parentOrphan {
-			n.requestBlock(ctx, block.PreviousBlockHash)
+			n.requestBlock(context.Background(), block.PreviousBlockHash)
 		}
 	}
 }

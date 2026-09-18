@@ -86,6 +86,29 @@ SAN_DB_BACKEND=memory go run ./cmd/sannode serve
 go run ./cmd/sancli --rpc http://127.0.0.1:8000 health
 ```
 
+### Start your Go node (bring-up script)
+
+```bash
+python scripts/go_node.py --wallet 0xYourAddress            # start, no stake
+python scripts/go_node.py --wallet 0xYourAddress --stake 100
+python scripts/go_node.py --status
+python scripts/go_node.py --stop
+```
+
+The script builds `bin/sannode` / `bin/sancli` when missing or outdated,
+creates `<data-dir>/san_key.json` on first run (the wallet must match that
+key), funds the wallet at genesis and reconciles `--stake` on every start
+(deposit, or all-or-nothing undelegate + withdraw + re-stake when lowering).
+For a single-machine devnet it defaults to `SAN_DB_BACKEND=memory`,
+`SAN_UNBONDING_PERIOD=0`, `SAN_MIN_VALIDATOR_STAKE=0` and
+`SAN_CONTROLLER_COUNT=0` (blocks are accepted locally; finality votes still
+run). Add `--bootstrap host:api_port` to join a seed.
+
+`python tools/go_e2e_check.py` is the test-only end-to-end check: it launches
+three nodes with `scripts/go_node.py` and verifies SAN transfers, a SANRC20
+deploy/mint/transfer, a custom KV/counter contract and stake 0 → 100 → 70
+with restarts, then cleans every process and port up.
+
 ## Python cross-check
 
 Python remains runnable and unchanged:
