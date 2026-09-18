@@ -224,6 +224,8 @@ func (n *Node) Synchronize(ctx context.Context) bool {
 		n.mu.Unlock()
 		n.flushPendingVotes()
 		log.Printf("Synced %d block(s) from %s", applied, PeerLabel(peer))
+		// A peer with a longer chain is the best source of fresh peers.
+		n.requestPeers(ctx)
 	}
 	return applied > 0
 }
@@ -271,6 +273,9 @@ func (n *Node) serveBlockRequest(ctx context.Context, stream *PeerStream, blockH
 }
 
 // requestBlock fetches one missing block (e.g. an orphan's parent) from a peer.
+// Peers that recently answered BLOCK_NOT_FOUND for the hash are tried last; if
+// every candidate lacks the block, a chain sync is attempted because the block
+// may live on a longer branch we have not seen yet.
 func (n *Node) requestBlock(ctx context.Context, blockHash string) bool {
 	if blockHash == "" {
 		return false
@@ -284,64 +289,190 @@ func (n *Node) requestBlock(ctx context.Context, blockHash string) bool {
 		n.requestedBlocks = map[string]struct{}{}
 	}
 	n.requestedBlocks[blockHash] = struct{}{}
-	peers := append([]map[string]any{}, n.PEERS...)
-	if n.outgoingNode != nil {
-		peers = append([]map[string]any{n.outgoingNode}, peers...)
-	}
 	n.mu.Unlock()
 
-	seen := map[string]struct{}{}
+	peers := n.blockFetchPeers(blockHash)
 	fetched := false
+	notFound := 0
 	for _, peer := range peers {
-		label := PeerLabel(peer)
-		if _, duplicate := seen[label]; duplicate {
-			continue
-		}
-		seen[label] = struct{}{}
-		if n.fetchBlock(ctx, peer, blockHash) {
+		accepted, missing := n.fetchBlock(ctx, peer, blockHash)
+		if accepted {
 			fetched = true
 			break
 		}
+		if missing {
+			notFound++
+			n.markPeerMissingBlock(peer, blockHash)
+		}
 	}
-	if !fetched {
-		// Allow a later gossip message to retry with a different peer.
+	if fetched {
+		n.clearBlockMisses(blockHash)
+		return true
+	}
+	// Allow a later gossip message to retry with a different peer.
+	n.mu.Lock()
+	delete(n.requestedBlocks, blockHash)
+	n.mu.Unlock()
+	if len(peers) > 0 && notFound == len(peers) {
+		// All candidates lack the block: it may live on a longer branch we
+		// have not seen. Throttle the catch-up attempt to one per peer-check
+		// interval so a batch of missing parents cannot start a sync storm.
 		n.mu.Lock()
-		delete(n.requestedBlocks, blockHash)
+		now := nowSeconds()
+		allowSync := now-n.blockMissSyncAt >= n.config.PeerCheckInterval
+		if allowSync {
+			n.blockMissSyncAt = now
+		}
 		n.mu.Unlock()
+		if allowSync {
+			log.Printf("No peer has block %.12s; trying a chain sync", blockHash)
+			n.Synchronize(ctx)
+		}
 	}
-	return fetched
+	return false
+}
+
+// blockFetchPeers orders the block-request candidates: the outgoing peer
+// first, then every known peer, with peers that recently reported the hash as
+// BLOCK_NOT_FOUND moved to the back. When everyone is marked they are all
+// still tried, so a peer that later learns the block is not starved.
+func (n *Node) blockFetchPeers(blockHash string) []map[string]any {
+	n.mu.Lock()
+	peers := append([]map[string]any{}, n.PEERS...)
+	outgoing := n.outgoingNode
+	n.mu.Unlock()
+
+	ordered := make([]map[string]any, 0, len(peers)+1)
+	seen := map[string]struct{}{}
+	add := func(peer map[string]any) {
+		if peer == nil {
+			return
+		}
+		label := PeerLabel(peer)
+		if _, duplicate := seen[label]; duplicate {
+			return
+		}
+		seen[label] = struct{}{}
+		ordered = append(ordered, peer)
+	}
+	add(outgoing)
+	for _, peer := range peers {
+		add(peer)
+	}
+
+	preferred := make([]map[string]any, 0, len(ordered))
+	deferred := make([]map[string]any, 0, len(ordered))
+	for _, peer := range ordered {
+		if n.peerMissingBlock(peer, blockHash) {
+			deferred = append(deferred, peer)
+		} else {
+			preferred = append(preferred, peer)
+		}
+	}
+	return append(preferred, deferred...)
+}
+
+// markPeerMissingBlock remembers that a peer answered BLOCK_NOT_FOUND for a
+// hash. Marks expire after BlockMissTTL and the map is bounded.
+func (n *Node) markPeerMissingBlock(peer map[string]any, blockHash string) {
+	if peer == nil || blockHash == "" {
+		return
+	}
+	label := PeerLabel(peer)
+	now := nowSeconds()
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	for hash, misses := range n.peerMissingBlocks {
+		for known, seen := range misses {
+			if now-seen > BlockMissTTL {
+				delete(misses, known)
+			}
+		}
+		if len(misses) == 0 {
+			delete(n.peerMissingBlocks, hash)
+		}
+	}
+	misses, ok := n.peerMissingBlocks[blockHash]
+	if !ok {
+		if len(n.peerMissingBlocks) >= 512 {
+			n.peerMissingBlocks = map[string]map[string]float64{}
+		}
+		misses = map[string]float64{}
+		n.peerMissingBlocks[blockHash] = misses
+	}
+	misses[label] = now
+}
+
+// peerMissingBlock reports whether a peer recently answered BLOCK_NOT_FOUND
+// for a hash.
+func (n *Node) peerMissingBlock(peer map[string]any, blockHash string) bool {
+	label := PeerLabel(peer)
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	misses, ok := n.peerMissingBlocks[blockHash]
+	if !ok {
+		return false
+	}
+	seen, present := misses[label]
+	return present && nowSeconds()-seen <= BlockMissTTL
+}
+
+// clearBlockMisses forgets the BLOCK_NOT_FOUND marks for a hash once the block
+// has been delivered or otherwise seen.
+func (n *Node) clearBlockMisses(blockHash string) {
+	n.mu.Lock()
+	delete(n.peerMissingBlocks, blockHash)
+	n.mu.Unlock()
+}
+
+// classifyBlockReply parses a GET_BLOCK reply: (block, notFound, ok).
+func classifyBlockReply(data map[string]any) (*ledger.Block, bool, bool) {
+	switch messageType, _ := data["type"].(string); messageType {
+	case "BLOCK_NOT_FOUND":
+		return nil, true, true
+	case "BLOCK":
+		blockData, ok := data["block"].(map[string]any)
+		if !ok {
+			return nil, false, false
+		}
+		block, err := ledger.BlockFromDict(blockData)
+		if err != nil {
+			return nil, false, false
+		}
+		return block, false, true
+	default:
+		return nil, false, false
+	}
 }
 
 // fetchBlock requests one block body from one peer and tries to connect it.
-func (n *Node) fetchBlock(ctx context.Context, peer map[string]any, blockHash string) bool {
+// It returns (accepted, notFound); notFound is true only for an explicit
+// BLOCK_NOT_FOUND reply so the caller can deprioritise that peer.
+func (n *Node) fetchBlock(ctx context.Context, peer map[string]any, blockHash string) (bool, bool) {
 	stream, err := OpenSession(ctx, n, peer, "p2p_port", n.sessionTimeout())
 	if err != nil {
 		log.Printf("Block request for %.12s failed: %v", blockHash, err)
-		return false
+		return false, false
 	}
 	defer stream.Close()
 	message, _ := encodeObject(map[string]any{"type": "GET_BLOCK", "block_hash": blockHash})
 	if err := stream.Send(ctx, string(message)); err != nil {
-		return false
+		return false, false
 	}
 	raw, err := stream.Recv(ctx)
 	if err != nil {
-		return false
+		return false, false
 	}
 	data, err := decodeObject(raw)
 	if err != nil {
-		return false
+		return false, false
 	}
-	if messageType, _ := data["type"].(string); messageType != "BLOCK" {
-		return false
-	}
-	blockData, ok := data["block"].(map[string]any)
+	block, notFound, ok := classifyBlockReply(data)
 	if !ok {
-		return false
+		return false, false
 	}
-	block, err := ledger.BlockFromDict(blockData)
-	if err != nil {
-		return false
+	if notFound {
+		return false, true
 	}
 
 	n.mu.Lock()
@@ -350,7 +481,7 @@ func (n *Node) fetchBlock(ctx context.Context, peer map[string]any, blockHash st
 	if accepted {
 		n.flushPendingVotes()
 	}
-	return accepted
+	return accepted, false
 }
 
 // sendToControllers requests approvals from the controller set and gossips the
@@ -470,6 +601,7 @@ func (n *Node) handleIncomingBlock(ctx context.Context, data map[string]any) {
 		log.Printf("Received malformed block: %v", err)
 		return
 	}
+	n.clearBlockMisses(block.CurrentBlockHash)
 
 	n.mu.Lock()
 	accepted := n.processIncomingBlock(block)

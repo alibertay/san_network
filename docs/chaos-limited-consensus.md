@@ -75,7 +75,7 @@ key whose address is expected. See [section 2](#2-proposer-selection-and-rounds)
 
 Before a locally produced block is committed and gossiped, the producing node
 asks its **controller set** for signed votes
-(`sendToControllers`, `internal/netnode/node_sync.go:358`;
+(`sendToControllers`, `internal/netnode/node_sync.go:489`;
 `Node.send_to_controllers`, `network/Node.py:2439`):
 
 * Each controller runs the full `verify_block` and answers with a signed
@@ -137,7 +137,7 @@ rotate through the list in order and wrap around.
 ### 2.2 Round clock
 
 Each node keeps local per-height round state
-(`{height, round, started}`; Go `proposerRoundState`, `internal/netnode/node.go:61`).
+(`{height, round, started}`; Go `proposerRoundState`, `internal/netnode/node.go:65`).
 `currentRoundLocked` (`internal/netnode/node_consensus.go:49`;
 `Node._current_round`, `network/Node.py:1221`) computes:
 
@@ -256,7 +256,7 @@ by the header checks and fail silently during state application.
 | state commitment | if `require_state_root` and `index > 0`: `state_root` must be present | `verifyBlock` |
 | round claim | section 2.3 | `verifyBlock` |
 | hash | `current_block_hash == sha3_256(canonical(header))` | `Block.CalculateHash` |
-| signature | `validator_signature` verifies over the block hash with `validator` pubkey (unless `SAN_REQUIRE_BLOCK_SIGNATURE=false`) | `VerifyBlockSignature`, `node.go:492` |
+| signature | `validator_signature` verifies over the block hash with `validator` pubkey (unless `SAN_REQUIRE_BLOCK_SIGNATURE=false`) | `VerifyBlockSignature`, `node.go:499` |
 | proposer | `address(validator) == expectedProposer(index, round)` when the active set is non-empty | `verifyBlock` |
 | tx root | recomputed Merkle root of the transactions must equal the announced `tx_root` | `BlockFromDict`, `internal/ledger/block.go:213` |
 | state root | recomputed state root must equal the announced `state_root` | `simulateBlock` |
@@ -434,7 +434,7 @@ one.
   `total_burned` and the full parameter map). `/finality` returns the chain
   id, tip height/hash, finalized height/hash and the pending vote heights
   (`handleFinality`, `internal/api/server.go:132`).
-* `/snapshot` (`FinalizedSnapshot`, `node.go:726`) serves a snapshot only if
+* `/snapshot` (`FinalizedSnapshot`, `node.go:733`) serves a snapshot only if
   its height is `<= finalized_height` and its hash matches the canonical
   block; a snapshot from a discarded branch is never served.
 
@@ -584,7 +584,7 @@ with finality as a floor:
 ### 6.3 Orphan parent fetches
 
 When a block arrives whose parent is unknown, the node asks peers for the
-parent with `GET_BLOCK` (`requestBlock`, `node_sync.go:274`):
+parent with `GET_BLOCK` (`requestBlock`, `node_sync.go:279`):
 
 * in-flight requests are deduplicated in `requestedBlocks` (up to 512, then
   the set is reset);
@@ -592,7 +592,13 @@ parent with `GET_BLOCK` (`requestBlock`, `node_sync.go:274`):
   the block; a failed fetch removes the dedup entry so a later gossip or
   health-check cycle can retry;
 * `BLOCK_NOT_FOUND` is a normal answer for a peer that does not have the
-  block; it is treated as a failed fetch;
+  block: Go records it per hash (`BlockMissTTL`, 120 s), moves that peer to
+  the end of the candidate list, and tries the others. When **every**
+  candidate lacks the block, one chain sync is attempted per
+  `SAN_PEER_CHECK_INTERVAL` because the block may live on a longer branch;
+  a successful fetch or an incoming gossip of the hash clears the marks.
+  (Python's reference treats `BLOCK_NOT_FOUND` as a plain failed fetch and
+  asks only its one selected peer; the wire behavior is identical.)
 * the peer health loop retries up to 8 missing parents per cycle.
 
 ---
@@ -670,11 +676,12 @@ Constants compiled into the node:
 |----------|-------|------|
 | `ProtocolVersion` | 2 | `internal/netnode/node.go:35` |
 | `SchemaVersion` | 5 | `internal/ledger/block.go:20` |
-| `VoteLookahead` | 64 | `internal/netnode/node.go:45` |
-| `MaxStagedVotersPerHash` | 128 | `internal/netnode/node.go:46` |
-| `VoteMaxBytes` | 16,384 | `internal/netnode/node.go:47` |
-| `HelloTTL` | 60.0 s | `internal/netnode/node.go:48` |
+| `VoteLookahead` | 64 | `internal/netnode/node.go:49` |
+| `MaxStagedVotersPerHash` | 128 | `internal/netnode/node.go:50` |
+| `VoteMaxBytes` | 16,384 | `internal/netnode/node.go:51` |
+| `HelloTTL` | 60.0 s | `internal/netnode/node.go:52` |
 | `BlockFutureDrift` / `BlockPastDrift` | 120.0 s / 120.0 s | `internal/netnode/node.go:39` |
+| `BlockMissTTL` | 120.0 s | `internal/netnode/node.go:45` |
 | `FinalityNumerator` / `FinalityDenominator` | 2 / 3 | `internal/ledger/economics.go:28` |
 | `DefaultProposerTimeoutMs` | 6000 | `internal/ledger/blockchain.go:13` |
 | `GenesisTimestamp` / `GenesisMessage` | 0.0 / `TEXT A MESSAGE TO THE HUMANITY` | `internal/ledger/blockchain.go:10` |

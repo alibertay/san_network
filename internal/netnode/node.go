@@ -40,6 +40,10 @@ const (
 	BlockPastDrift   = 120.0
 )
 
+// A peer that answers BLOCK_NOT_FOUND for a hash is not asked again for that
+// hash (except as a last resort) for this long.
+const BlockMissTTL = 120.0
+
 // Finality vote bounds (mirrors Node.py).
 const (
 	VoteLookahead          = 64
@@ -129,6 +133,8 @@ type Node struct {
 	seenBlockGossip    map[string]struct{}
 	peerFailures       map[string]int
 	requestedBlocks    map[string]struct{}
+	peerMissingBlocks  map[string]map[string]float64
+	blockMissSyncAt    float64
 	syncMisses         int
 	proposerState      *proposerRoundState
 	anchorState        *anchorState
@@ -241,6 +247,7 @@ func newNode(config NodeConfig, identity *ledger.NodeIdentity, kv store.KeyValue
 		seenBlockGossip:    map[string]struct{}{},
 		peerFailures:       map[string]int{},
 		requestedBlocks:    map[string]struct{}{},
+		peerMissingBlocks:  map[string]map[string]float64{},
 		storage:            sanvm.NewStorage(),
 		transactionPool:    []*ledger.Transaction{},
 		poolTxIDs:          map[string]struct{}{},

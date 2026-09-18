@@ -23,3 +23,7 @@ san_key.json
 devnet-keys/
 
 .DS_Store
+
+# Go build outputs (scripts rebuild them on demand)
+bin/
+*.exe

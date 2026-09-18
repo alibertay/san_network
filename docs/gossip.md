@@ -42,7 +42,7 @@ Implementation:
 
 * Server: `p2pServer` in `internal/netnode/transport.go:126`; the same server
   is bound to `peer_port`, `p2p_port` and `controller_port`
-  (`startServers`, `internal/netnode/node.go:353`). Python does the same in
+  (`startServers`, `internal/netnode/node.go:360`). Python does the same in
   `network/transport.py:204`.
 * Client: `OpenSession` (`transport.go:337`) opens a `Session`, sends a
   signed `HELLO`, waits for the peer's `HELLO_ACK`, then returns a
@@ -51,7 +51,7 @@ Implementation:
   256-slot queue (`SessionQueueSize`); `Send` blocks when the queue is full
   (backpressure) and `Recv` returns `PeerClosed` when the session ends.
 * Most gossip is sent over **one-shot sessions**: `sendToPeer`
-  (`node_peers.go:485`) opens a session, sends exactly one message and closes
+  (`node_peers.go:488`) opens a session, sends exactly one message and closes
   it. The Go sender flushes queued messages before tearing the connection
   down (`transport.go:374`).
 
@@ -111,19 +111,32 @@ periodic re-announcements do not trigger re-gossip.
 * The node answers a peer's `GET_PEERS` with its own list (`PEERS`); when a
   **new** record is added it also calls `refreshPeerSelection()` and
   announces that record to every other peer (`gossipPeers`,
-  `node_peers.go:447`).
+  `node_peers.go:450`).
+* The node also **asks**: `requestPeers` (`node_peers.go:547`) sends
+  `GET_PEERS`, waits up to `2 * SAN_WS_TIMEOUT` for a `PEERS` reply, and
+  merges every record through the same `addPeer` path used by `PEER_UPDATE`
+  (chain binding, freshness, signature, self/dedup/`SAN_MAX_PEERS`). Self
+  entries already in the table are pruned and the selection is refreshed. A
+  reply is truncated to `2 * SAN_MAX_PEERS` records and draws no reply, so a
+  hostile list cannot force unbounded signature verification or a gossip
+  storm.
 
 ### 2.4 Discovery
 
-On startup `bootstrap` (`node_peers.go:506`) runs when `SAN_BOOTSTRAP` is set:
+On startup `bootstrap` (`node_peers.go:509`) runs when `SAN_BOOTSTRAP` is set:
 
 1. Try the gRPC `Bootstrap` RPC (`RemoteBootstrap`, 5 s timeout).
 2. If it returns nothing, fall back to the REST `GET /bootstrap`
-   (`DiscoverPeers`, `node.go:1254`, 5 s timeout).
+   (`DiscoverPeers`, `node.go:1261`, 5 s timeout).
 3. Merge the records (`AddPeers`), and if any peer was added, register with
    `RegisterToNetwork`.
+4. Ask the selected peer for its own list over the session stream
+   (`requestPeers`) so a partial seed list converges.
 
-`POST /join` performs the same REST discovery on demand.
+`POST /join` performs the same REST discovery on demand. The health loop
+(section 3) and a successful `Synchronize` (section 7.2) also call
+`requestPeers`, so discovery converges over the session stream even when the
+REST `/bootstrap` endpoint is unreachable.
 
 ---
 
@@ -134,7 +147,9 @@ The peer health loop (`peerHealthLoop`, `node_peers.go:334`) runs every
 following:
 
 1. `CheckDeadPeers` (below) and `refreshPeerSelection`.
-2. If peers exist: `RegisterToNetwork` (self-healing re-announcement).
+2. If peers exist: `RegisterToNetwork` (self-healing re-announcement) and
+   `requestPeers` (pull the outgoing peer's list with `GET_PEERS` -> `PEERS`,
+   merge and refresh the selection).
 3. `maybeProduceFromPool` (retry block production; e.g. a controller was
    briefly down).
 4. `flushPendingVotes` and `rebroadcastOwnVotes`.
@@ -144,11 +159,11 @@ following:
 
 ### 3.1 PING/PONG and eviction
 
-`PingNode` (`node_peers.go:422`) opens a one-shot peer session, sends
+`PingNode` (`node_peers.go:425`) opens a one-shot peer session, sends
 `PING`, waits up to 3 seconds for `PONG`, and returns true only when the
 handshake completed and the peer answered.
 
-`CheckDeadPeers` (`node_peers.go:389`):
+`CheckDeadPeers` (`node_peers.go:392`):
 
 * a successful ping clears `peerFailures[host:api_port]`;
 * a failed ping increments it; below `SAN_PEER_MISS_THRESHOLD` (default 2)
@@ -159,7 +174,7 @@ handshake completed and the peer answered.
 
 Received `DEAD_PEER` messages are **ignored** ("unsigned eviction claims are
 ignored: peers are only dropped by our own health checks",
-`node_peers.go:646`). `SAN_MAX_PEERS` bounds how many records the node keeps.
+`node_peers.go:767`). `SAN_MAX_PEERS` bounds how many records the node keeps.
 
 ---
 
@@ -193,7 +208,7 @@ Controller selection (`selectControllers`, `node_peers.go:233`):
 
 The controller service itself answers `BLOCK_VOTE_REQUEST` with a signed
 `BLOCK_VOTE_RESPONSE` after running full block verification
-(`serveBlockVote`, `node_sync.go:436`). The selection is only used on the
+(`serveBlockVote`, `node_sync.go:567`). The selection is only used on the
 requesting side; any peer that is asked verifies and answers.
 
 Because selection uses the local peer table, different nodes can have
@@ -205,9 +220,9 @@ different controller sets. See the consensus document's threat model.
 
 Every session starts with a handshake; after that the dispatcher routes by
 `type`. Messages handled before the generic peer handler
-(`dispatchPeerMessage`, `node_peers.go:596`): `GET_BLOCK`, `BLOCK`,
+(`dispatchPeerMessage`, `node_peers.go:717`): `GET_BLOCK`, `BLOCK`,
 `BLOCK_VOTE_REQUEST`. Everything else goes to `handlePeerMessage`
-(`node_peers.go:617`). Unknown types are logged and ignored.
+(`node_peers.go:738`). Unknown types are logged and ignored.
 
 | Type | Direction | Port | Purpose and flow |
 |------|-----------|------|------------------|
@@ -217,8 +232,8 @@ Every session starts with a handshake; after that the dispatcher routes by
 | `PONG` | either | peer | Answer to `PING`. |
 | `PEER_UPDATE` | either | peer | One signed peer record. Verified, deduplicated, added, then re-gossiped to all other peers. |
 | `DEAD_PEER` | either | peer | Claim that a peer is dead. **Ignored** on receipt; only local health checks evict. |
-| `GET_PEERS` | either | peer | Ask for the peer list; responder replies `PEERS` (`node.Peers()`). |
-| `PEERS` | either | peer | Peer list reply. Not consumed by the node itself (no requester path in either implementation); discovery uses `Bootstrap`/`/bootstrap`. |
+| `GET_PEERS` | either | peer | Ask for the peer list; the responder replies `PEERS` with its stored records (`node.Peers()`), exactly like Python (`node_peers.go:773`). |
+| `PEERS` | either | peer | Peer list reply. Go verifies and merges every record (`handlePeersMessage`, `node_peers.go:594`), prunes self entries, refreshes the selection and truncates the list to `2 * SAN_MAX_PEERS`; the Python reference only answers `GET_PEERS` (it has no `PEERS` client path). |
 | `TX` | either | peer | One mempool transaction payload; re-validated and pooled, then gossiped if new. |
 | `GET_TXS` | either | peer | Ask for up to 64 mempool transactions. |
 | `TXS` | either | peer | Answer to `GET_TXS` (at most 64 payloads). |
@@ -248,6 +263,8 @@ initiator                                             responder
     |------ TX {payload} -------------------------------->| ingest -> gossip
     |------ GET_TXS ------------------------------------->|
     |<----- TXS {txs:[...]} ------------------------------|
+    |------ GET_PEERS ----------------------------------->| handlePeerMessage
+    |<----- PEERS {peers:[...]} --------------------------|
     |------ GET_BLOCK {block_hash} ---------------------->| dispatch -> serveBlockRequest
     |<----- BLOCK {block} / BLOCK_NOT_FOUND --------------|
     |------ BLOCK_VOTE_REQUEST {block} ------------------>| dispatch -> serveBlockVote
@@ -256,7 +273,7 @@ initiator                                             responder
     |  ...                                                |
 ```
 
-`VerifyHello` (`node.go:435`) enforces `type in {HELLO, HELLO_ACK}`,
+`VerifyHello` (`node.go:442`) enforces `type in {HELLO, HELLO_ACK}`,
 `protocol == 2`, matching `chain_id`, `|now - timestamp| <= HELLO_TTL`
 (60 s), and a valid signature over the record without `signature`.
 
@@ -271,7 +288,7 @@ returned by the REST API (`POST /transaction`); they are not gossiped.
 
 ### 6.1 Block gossip
 
-`gossipBlock` (`node_sync.go:519`; `Node.gossip_block`,
+`gossipBlock` (`node_sync.go:651`; `Node.gossip_block`,
 `network/Node.py:2517`):
 
 * deduplicates by block hash (`seenBlockGossip`, reset to the latest hash
@@ -284,7 +301,7 @@ returned by the REST API (`POST /transaction`); they are not gossiped.
   (default, deduplication makes repeated calls no-ops). Sync and `GET_BLOCK`
   fetch paths commit blocks without re-gossiping them.
 
-`handleIncomingBlock` (`node_sync.go:462`) also applies a sync-miss
+`handleIncomingBlock` (`node_sync.go:593`) also applies a sync-miss
 heuristic: if a block that extends the tip fails local verification twice in
 a row, the node calls `Synchronize` instead of stalling (using a fresh
 background context because one-shot gossip sessions are canceled when the
@@ -321,7 +338,7 @@ cycle, so a single dropped message cannot stall finality.
 
 ### 7.1 Status and longest-chain selection
 
-`PeerStatus` (`internal/netnode/node_peers.go:715`;
+`PeerStatus` (`internal/netnode/node_peers.go:847`;
 `Node.peer_status`, `network/Node.py:3036`) returns:
 
 | Field | Meaning |
@@ -376,18 +393,33 @@ while applied < maxBlocks:
   that extends a fresh local tip is validated with live rules.
 * A version newer than the local schema stops the sync; verification or
   commit failure stops the batch.
-* After applying blocks: `connectOrphans`, `lastSeenBlockIndex = tip`, and
-  `flushPendingVotes`.
+* After applying blocks: `connectOrphans`, `lastSeenBlockIndex = tip`,
+  `flushPendingVotes`, then `requestPeers` (a peer with a longer chain is a
+  good source of fresh peer records).
 
 ### 7.3 Block fetch fallback
 
 For a missing parent (or any requested hash), `requestBlock`
-(`node_sync.go:274`) opens a `GET_BLOCK` session on `p2p_port`, tries the
+(`node_sync.go:279`) opens a `GET_BLOCK` session on `p2p_port`, tries the
 outgoing peer first and then each known peer, with in-flight deduplication
-(`requestedBlocks`, reset above 512 entries). `fetchBlock` accepts only a
-`BLOCK` reply, parses it, and runs `processIncomingBlock`; `BLOCK_NOT_FOUND`
-and any other reply count as a failed fetch, and the dedup entry is removed
-so a later cycle can retry.
+(`requestedBlocks`, reset above 512 entries). `fetchBlock`
+(`node_sync.go:451`) classifies the reply (`classifyBlockReply`,
+`node_sync.go:429`):
+
+* `BLOCK`: parsed and passed through `processIncomingBlock`;
+* `BLOCK_NOT_FOUND`: the peer is marked as missing that hash
+  (`markPeerMissingBlock`, `BlockMissTTL` = 120 s) and moved to the back of
+  the candidate list for that hash (`blockFetchPeers`), but it is still tried
+  when every peer is marked; a successful fetch or any incoming gossip of the
+  hash clears the marks (`clearBlockMisses`);
+* anything else: a plain failed fetch.
+
+If **every** candidate answers `BLOCK_NOT_FOUND`, one chain sync is
+attempted (at most once per `SAN_PEER_CHECK_INTERVAL`) because the block may
+live on a longer branch we have not seen. In all failure cases the dedup
+entry is removed so a later cycle can retry. Python's `_request_block` asks a
+single peer and treats `BLOCK_NOT_FOUND` as a generic failure, so the Go
+retry policy is a strict extension that changes nothing on the wire.
 
 ---
 
@@ -395,13 +427,13 @@ so a later cycle can retry.
 
 | Mechanism | Implementation |
 |-----------|----------------|
-| Handshake first | `acceptHandshake` (`node_peers.go:567`) rejects any connection whose first message is not a valid `HELLO`; handshake timeout is `2 * SAN_WS_TIMEOUT`. |
+| Handshake first | `acceptHandshake` (`node_peers.go:688`) rejects any connection whose first message is not a valid `HELLO`; handshake timeout is `2 * SAN_WS_TIMEOUT`. |
 | Session queue bounds | inbound/outbound queues of `SessionQueueSize = 256`; a flooding peer blocks on the queue instead of growing memory. |
 | Concurrent session cap | `MaxConcurrentSessions = 256`; over the cap gRPC returns `ResourceExhausted`. |
 | Concurrent sync cap | `MaxConcurrentSyncs = 8` (`transport.go:241`). |
 | Per-connection rate limit | at most `SAN_PEER_RATE_LIMIT` inbound messages (default 60) per `SAN_PEER_RATE_WINDOW` (default 10 s); the session is closed on excess. |
 | Message size cap | `grpc.MaxRecvMsgSize`/`MaxSendMsgSize` set to `SAN_WS_MAX_SIZE` (default 1 MiB) on server and client (`BuildServer`, `dialPeer`). |
-| Controller vote verification | approval responses are checked for chain id, block hash, advertised public key and signature before counting (`requestBlockVote`, `node_sync.go:378`). |
+| Controller vote verification | approval responses are checked for chain id, block hash, advertised public key and signature before counting (`requestBlockVote`, `node_sync.go:509`). |
 | Peer record freshness | ±`SAN_PEER_TTL` (default 300 s) and signature verification; unsigned records rejected by default. |
 | Dead-peer claims | `DEAD_PEER` is not trusted; eviction requires the local ping threshold. |
 | Orphan/request bounds | `SAN_MAX_ORPHANS` buffered fork blocks, `SAN_MAX_REORG_DEPTH` reorg bound, 512 in-flight block requests (reset when exceeded). |
@@ -418,7 +450,7 @@ so a later cycle can retry.
 | `SessionQueueSize` | 256 | `internal/netnode/transport.go:26` |
 | `MaxConcurrentSessions` | 256 | `internal/netnode/transport.go:27` |
 | `MaxConcurrentSyncs` | 8 | `internal/netnode/transport.go:28` |
-| `HelloTTL` (handshake freshness) | 60 s | `internal/netnode/node.go:48` |
+| `HelloTTL` (handshake freshness) | 60 s | `internal/netnode/node.go:52` |
 | `SAN_PEER_TTL` (`PeerRecordTTL`) | 300 s | `internal/netnode/config.go:94` |
 | `SAN_PEER_CHECK_INTERVAL` | 30 s | `internal/netnode/config.go:84` |
 | `SAN_PEER_MISS_THRESHOLD` | 2 | `internal/netnode/config.go:95` |
@@ -429,13 +461,17 @@ so a later cycle can retry.
 | `SAN_SYNC_MAX_BLOCKS` | 50,000 | `internal/netnode/config.go:104` |
 | Sync page hard cap | 512 blocks | `internal/netnode/node_sync.go:28` |
 | `SAN_EPOCH_LENGTH` | 100 | `internal/netnode/config.go:96` |
-| `SAN_CONTROLLER_COUNT` | 10 | `internal/netnode/config.go:76` |
+| `SAN_CONTROLLER_COUNT` | 10 | `internal/netnode/config.go:78` |
 | `SAN_CONTROLLER_MIN_STAKE` | 0 | `internal/netnode/config.go:232` |
-| Orphan parent retries per health cycle | 8 | `internal/netnode/node_peers.go:374` |
-| In-flight block request bound | 512 | `internal/netnode/node_sync.go:283` |
-| Mempool pull page | 64 transactions | `internal/netnode/node_peers.go:668` |
-| Ping response timeout | 3 s | `internal/netnode/node_peers.go:432` |
-| Bootstrap (`SAN_BOOTSTRAP`) timeout | 5 s (gRPC and REST) | `internal/netnode/node_peers.go:512` |
+| Orphan parent retries per health cycle | 8 | `internal/netnode/node_peers.go:380` |
+| In-flight block request bound | 512 | `internal/netnode/node_sync.go:288` |
+| Mempool pull page | 64 transactions | `internal/netnode/node_peers.go:798` |
+| Ping response timeout | 3 s | `internal/netnode/node_peers.go:435` |
+| Bootstrap (`SAN_BOOTSTRAP`) timeout | 5 s (gRPC and REST) | `internal/netnode/node_peers.go:515` |
+| `GET_PEERS` reply timeout | `2 * SAN_WS_TIMEOUT` (6 s) | `internal/netnode/node_peers.go:572` |
+| `PEERS` reply cap | `2 * SAN_MAX_PEERS` (128 records) | `internal/netnode/node_peers.go:595` |
+| `BlockMissTTL` (BLOCK_NOT_FOUND memory) | 120 s | `internal/netnode/node.go:45` |
+| Missing-block sync throttle | one per `SAN_PEER_CHECK_INTERVAL` | `internal/netnode/node_sync.go:322` |
 
 ---
 
@@ -444,17 +480,25 @@ so a later cycle can retry.
 * **Same protocol, two implementations.** Go (`internal/netnode`) and Python
   (`network/Node.py`) share the JSON message vocabulary, chain-id binding and
   handshake rules; the Go tests include a two-node P2P test
-  (`internal/netnode/node_p2p_test.go`). There is no cross-language live
-  network test, so message-level compatibility has not been exercised
-  Go-to-Python in this repository.
-* **`GET_PEERS`/`PEERS` are only half-wired.** Both implementations answer
-  `GET_PEERS`, but neither has a client path that asks for `PEERS` (the
-  health loop, bootstrap and sync all use `Status`/`Bootstrap`/REST
-  `/bootstrap`). An incoming `PEERS` message is treated as unknown and
-  ignored.
-* **`BLOCK_NOT_FOUND` is not dispatched.** It is produced by the server, but
-  the fetching client only distinguishes "a `BLOCK` reply" from "anything
-  else"; both failure kinds retry the same way.
+  (`internal/netnode/node_p2p_test.go`) and a live PEERS/GET_BLOCK exchange
+  over gRPC (`internal/netnode/node_peers_wiring_test.go`). There is no
+  cross-language live network test, so message-level compatibility has not
+  been exercised Go-to-Python in this repository.
+* **`GET_PEERS`/`PEERS` client path is Go-only.** Go answers `GET_PEERS` with
+  its raw stored record list (exactly like Python) and now also asks:
+  bootstrap, the health loop and a successful sync call `requestPeers`, which
+  merges the `PEERS` reply through the same verification/`SAN_MAX_PEERS` path
+  as `PEER_UPDATE`, prunes self entries and refreshes the selection. The
+  frozen Python reference has no client path for `PEERS` (its
+  `_handle_peer_message` treats the type as unknown), so a Go node can pull
+  peer lists from Python nodes but not vice versa until Python is updated.
+* **`BLOCK_NOT_FOUND` retry policy is Go-only.** Both servers produce
+  `BLOCK_NOT_FOUND`; Python's `_request_block` treats it as a generic failed
+  fetch and asks only its one selected peer. Go classifies the reply,
+  deprioritises that peer for the hash for `BlockMissTTL` (120 s), keeps
+  walking the peer list, and triggers one throttled chain sync when every
+  peer reports the hash unknown. The wire format is unchanged, so the
+  difference is local retry policy only.
 * **No standalone SYNC status message.** Synchronization uses the unary
   `Sync` RPC plus the unary `Status` RPC; there is no `SYNC`/`status`
   message type inside `Session`.

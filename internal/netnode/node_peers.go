@@ -352,6 +352,9 @@ func (n *Node) peerHealthLoop(ctx context.Context) {
 			n.mu.Unlock()
 			if hasPeers {
 				n.RegisterToNetwork(ctx)
+				// Pull the peer list so discovery converges even when the
+				// REST /bootstrap endpoint is not reachable.
+				n.requestPeers(ctx)
 			}
 			n.maybeProduceFromPool()
 			n.flushPendingVotes()
@@ -527,6 +530,124 @@ func (n *Node) bootstrap(ctx context.Context) {
 		return
 	}
 	n.RegisterToNetwork(ctx)
+	// The seed list may be partial; ask a peer directly over the session
+	// stream for its current view.
+	n.requestPeers(ctx)
+}
+
+// ---------------------------------------------------------------------- #
+// Peer list exchange (GET_PEERS / PEERS)
+// ---------------------------------------------------------------------- #
+
+// requestPeers asks a selected peer for its peer list over the session stream
+// (GET_PEERS -> PEERS) and merges the reply. It returns the number of newly
+// added records. Python has no client path for this message; the Go node uses
+// it from bootstrap, the health loop and after a successful sync so peer
+// discovery converges without the REST endpoint.
+func (n *Node) requestPeers(ctx context.Context) int {
+	n.mu.Lock()
+	peer := n.outgoingNode
+	if peer == nil && len(n.PEERS) > 0 {
+		peer = n.PEERS[0]
+	}
+	n.mu.Unlock()
+	if peer == nil {
+		return 0
+	}
+
+	stream, err := OpenSession(ctx, n, peer, "peer_port", n.sessionTimeout())
+	if err != nil {
+		log.Printf("Peer list request to %s failed: %v", PeerLabel(peer), err)
+		return 0
+	}
+	defer stream.Close()
+
+	message, err := encodeObject(map[string]any{"type": "GET_PEERS"})
+	if err != nil {
+		return 0
+	}
+	if err := stream.Send(ctx, string(message)); err != nil {
+		return 0
+	}
+	callCtx, cancel := context.WithTimeout(ctx, time.Duration(2*n.config.WSTimeout*float64(time.Second)))
+	defer cancel()
+	raw, err := stream.Recv(callCtx)
+	if err != nil {
+		log.Printf("Peer list request to %s failed: %v", PeerLabel(peer), err)
+		return 0
+	}
+	data, err := decodeObject(raw)
+	if err != nil {
+		return 0
+	}
+	if messageType, _ := data["type"].(string); messageType != "PEERS" {
+		return 0
+	}
+	return n.handlePeersMessage(data["peers"])
+}
+
+// handlePeersMessage merges a PEERS reply: every record is verified by
+// addPeer (chain binding, freshness, signature, self/dedup/MaxPeers), self
+// entries already in the table are pruned and the selection is refreshed.
+// The list is truncated to twice SAN_MAX_PEERS so a hostile reply cannot
+// force unbounded signature verification.
+func (n *Node) handlePeersMessage(peers any) int {
+	limit := n.config.MaxPeers * 2
+	if limit < 8 {
+		limit = 8
+	}
+	switch typed := peers.(type) {
+	case []any:
+		if len(typed) > limit {
+			peers = typed[:limit]
+		}
+	case []map[string]any:
+		if len(typed) > limit {
+			peers = append([]map[string]any{}, typed[:limit]...)
+		}
+	}
+	added := n.mergePeers(peers)
+	removed := n.pruneSelfPeers()
+	if added > 0 || removed > 0 {
+		n.refreshPeerSelection()
+	}
+	if added > 0 {
+		log.Printf("Learned %d peer(s) from a PEERS reply", added)
+	}
+	return added
+}
+
+// pruneSelfPeers drops records that describe this node itself (e.g. a stale
+// record echoed back through a peer list). isSelf runs outside n.mu because
+// it may resolve the local hostname.
+func (n *Node) pruneSelfPeers() int {
+	n.mu.Lock()
+	peers := append([]map[string]any{}, n.PEERS...)
+	n.mu.Unlock()
+
+	selfKeys := map[string]struct{}{}
+	for _, peer := range peers {
+		if n.isSelf(peer) {
+			selfKeys[stringValue(peer["host"])+":"+stringValue(peer["api_port"])] = struct{}{}
+		}
+	}
+	if len(selfKeys) == 0 {
+		return 0
+	}
+
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	kept := make([]map[string]any, 0, len(n.PEERS))
+	removed := 0
+	for _, peer := range n.PEERS {
+		if _, self := selfKeys[stringValue(peer["host"])+":"+stringValue(peer["api_port"])]; self {
+			removed++
+			continue
+		}
+		kept = append(kept, peer)
+	}
+	n.PEERS = kept
+	return removed
 }
 
 // ---------------------------------------------------------------------- #
@@ -655,6 +776,17 @@ func (n *Node) handlePeerMessage(ctx context.Context, stream *PeerStream, raw st
 			return err
 		}
 		return stream.Send(ctx, string(message))
+
+	case "PEERS":
+		n.handlePeersMessage(data["peers"])
+		return nil
+
+	case "BLOCK_NOT_FOUND":
+		// Consumed inline by fetchBlock as the answer to GET_BLOCK. An
+		// unsolicited reply has no session peer attached here, so it is only
+		// logged; Python treats it as a failed fetch as well.
+		log.Printf("Ignoring unsolicited BLOCK_NOT_FOUND for %.12s", stringValue(data["block_hash"]))
+		return nil
 
 	case "TX":
 		n.IngestTransaction(data["tx"])
