@@ -9,7 +9,9 @@ import (
 	"github.com/alibertay/san_network/internal/canonical"
 )
 
-// CounterNames and GaugeNames mirror app/metrics.py order exactly.
+// CounterNames and GaugeNames mirror app/metrics.py order exactly for the
+// shared metrics; Go-only local peer-management metrics are appended after
+// them so Python parity for the common prefix is preserved.
 var counterNames = []string{
 	"blocks_committed",
 	"transactions_committed",
@@ -26,6 +28,14 @@ var counterNames = []string{
 	"reorgs",
 	"slashing_events",
 	"governance_changes",
+	"peer_penalties",
+	"peers_banned",
+	"peers_rejected_inbound",
+	"peers_rejected_subnet",
+	"peers_rejected_banned",
+	"peer_malformed_messages",
+	"peer_rate_limit_hits",
+	"peer_invalid_records",
 }
 
 var gaugeNames = []string{
@@ -41,6 +51,8 @@ var gaugeNames = []string{
 	"base_fee",
 	"contracts",
 	"orphans",
+	"controllers_target",
+	"peer_bans_active",
 }
 
 // RenderMetrics reproduces app.metrics.render_metrics line for line.

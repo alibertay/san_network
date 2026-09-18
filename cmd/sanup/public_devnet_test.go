@@ -82,6 +82,28 @@ func TestBuildChildEnvJoinIncludesBootstrap(t *testing.T) {
 	}
 }
 
+func TestBuildChildEnvPublicDevnetKeepsControllerCount(t *testing.T) {
+	t.Setenv("SAN_PUBLIC_DEVNET", "1")
+	t.Setenv("SAN_CONTROLLER_COUNT", "7")
+	opts := options{dataDir: t.TempDir(), host: "0.0.0.0", chainID: "san-devnet-1"}
+	ports := nodePorts{API: 8000, P2P: 8765, Peer: 8770, Controller: 8769}
+	env := envMap(buildChildEnv(opts, "/data", "/data/key.json", "ab", "0xabc", ports, false, "", nil))
+	if got := env["SAN_CONTROLLER_COUNT"]; got != "7" {
+		t.Fatalf("public-devnet SAN_CONTROLLER_COUNT: got %q, want the operator value 7", got)
+	}
+}
+
+func TestBuildChildEnvDevModeForcesNoControllers(t *testing.T) {
+	t.Setenv("SAN_PUBLIC_DEVNET", "")
+	t.Setenv("SAN_CONTROLLER_COUNT", "7")
+	opts := options{dataDir: t.TempDir(), host: "0.0.0.0", chainID: "san-devnet-1"}
+	ports := nodePorts{API: 8000, P2P: 8765, Peer: 8770, Controller: 8769}
+	env := envMap(buildChildEnv(opts, "/data", "/data/key.json", "ab", "0xabc", ports, false, "", nil))
+	if got := env["SAN_CONTROLLER_COUNT"]; got != "0" {
+		t.Fatalf("dev-mode SAN_CONTROLLER_COUNT: got %q, want 0", got)
+	}
+}
+
 func TestCertSubcommandGeneratesUsablePair(t *testing.T) {
 	dir := t.TempDir()
 	var stdout, stderr bytes.Buffer

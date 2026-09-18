@@ -193,7 +193,13 @@ func (n *Node) addPeerFrom(raw any, source string) int {
 	if !ok || n.isSelf(record) || n.isOwnRecord(record) {
 		return 0
 	}
+	if n.peerBanned(record) {
+		n.incMetric("peers_rejected_banned")
+		return 0
+	}
 	if !n.VerifyPeerRecord(record) {
+		n.notePeerSignal(record, scoreSignalBadRecord)
+		n.incMetric("peer_invalid_records")
 		return 0
 	}
 
@@ -203,6 +209,11 @@ func (n *Node) addPeerFrom(raw any, source string) int {
 		if SamePeer(record, known) {
 			return 0
 		}
+	}
+	if n.subnetPeerLimitReachedLocked(record) {
+		log.Printf("Peer subnet cap reached; ignoring %s", PeerLabel(record))
+		n.incMetric("peers_rejected_subnet")
+		return 0
 	}
 	if len(n.PEERS) >= n.config.MaxPeers {
 		log.Printf("Peer limit reached (%d); ignoring %s", n.config.MaxPeers, PeerLabel(record))
@@ -255,6 +266,19 @@ func (n *Node) controllerEligible(peer map[string]any) bool {
 	publicKey, _ := peer["public_key"].(string)
 	if publicKey == "" {
 		return false
+	}
+	// Stale records age out locally even when they were admitted while fresh:
+	// a controller that stopped re-announcing must not keep counting towards
+	// the pre-commit quorum forever.
+	if timestamp, present := peer["timestamp"]; present && timestamp != nil {
+		value, ok := numericValue(timestamp)
+		if !ok {
+			return false
+		}
+		age := nowSeconds() - value
+		if age > n.config.PeerRecordTTL || age < -n.config.PeerRecordTTL {
+			return false
+		}
 	}
 	if n.config.ControllerMinStake > 0 {
 		address, ok := ledger.TryAddressFromPublicKey(publicKey)
@@ -445,8 +469,10 @@ func (n *Node) CheckDeadPeers(ctx context.Context) {
 			n.mu.Lock()
 			delete(n.peerFailures, key)
 			n.mu.Unlock()
+			n.notePeerSignal(peer, scoreSignalHealth)
 			continue
 		}
+		n.notePeerSignal(peer, scoreSignalTimeout)
 		n.mu.Lock()
 		failures := n.peerFailures[key] + 1
 		n.peerFailures[key] = failures
@@ -723,10 +749,13 @@ func (n *Node) PeerSession(ctx context.Context, stream *PeerStream) error {
 		messageCount++
 		if messageCount > n.config.PeerRateLimit {
 			log.Printf("Peer exceeded the message rate limit; closing")
+			n.notePeerSignalKey(stream.PeerKey, scoreSignalRateLimit)
+			n.incMetric("peer_rate_limit_hits")
 			stream.Close()
 			return nil
 		}
 		if err := n.dispatchPeerMessage(ctx, stream, raw); err != nil {
+			n.noteMalformedMessage(stream.PeerKey)
 			log.Printf("Peer message failed: %v", err)
 		}
 	}
@@ -750,6 +779,13 @@ func (n *Node) acceptHandshake(ctx context.Context, stream *PeerStream) bool {
 		stream.Close()
 		return false
 	}
+	publicKey, _ := data["public_key"].(string)
+	if n.peerKeyBanned(publicKey) {
+		log.Printf("Rejected connection: peer %s is banned", publicKey)
+		stream.Close()
+		return false
+	}
+	stream.PeerKey = publicKey
 	ack := n.HelloPayload("HELLO_ACK")
 	encoded, err := encodeObject(ack)
 	if err != nil {
@@ -773,7 +809,9 @@ func (n *Node) dispatchPeerMessage(ctx context.Context, stream *PeerStream, raw 
 		n.serveBlockRequest(ctx, stream, data["block_hash"])
 		return nil
 	case "BLOCK":
-		n.handleIncomingBlock(ctx, data)
+		if n.handleIncomingBlock(ctx, data) {
+			n.notePeerSignalKey(stream.PeerKey, scoreSignalValidBlock)
+		}
 		return nil
 	case "BLOCK_VOTE_REQUEST":
 		n.serveBlockVote(ctx, stream, data)
@@ -800,6 +838,8 @@ func (n *Node) handlePeerMessage(ctx context.Context, stream *PeerStream, raw st
 			return nil
 		}
 		if !n.VerifyPeerRecord(newPeer) {
+			n.notePeerSignal(newPeer, scoreSignalBadRecord)
+			n.incMetric("peer_invalid_records")
 			return nil
 		}
 		if n.seenRecently(newPeer) {
@@ -837,7 +877,9 @@ func (n *Node) handlePeerMessage(ctx context.Context, stream *PeerStream, raw st
 		return nil
 
 	case "TX":
-		n.IngestTransaction(data["tx"])
+		if n.IngestTransaction(data["tx"]) {
+			n.notePeerSignalKey(stream.PeerKey, scoreSignalValidTx)
+		}
 		return nil
 
 	case "GET_TXS":
@@ -862,8 +904,14 @@ func (n *Node) handlePeerMessage(ctx context.Context, stream *PeerStream, raw st
 		if len(txs) > 64 {
 			txs = txs[:64]
 		}
+		accepted := 0
 		for _, payload := range txs {
-			n.IngestTransaction(payload)
+			if n.IngestTransaction(payload) {
+				accepted++
+			}
+		}
+		if accepted > 0 {
+			n.notePeerSignalKey(stream.PeerKey, scoreSignalValidTx)
 		}
 		return nil
 

@@ -46,6 +46,9 @@ type addrEntry struct {
 	LastTried float64        `json:"last_tried"`
 	Failures  int            `json:"failures"`
 	Tried     bool           `json:"tried"`
+	// Score is the local peer reputation (peerscore.go); persisted so useful
+	// reputation survives restarts. Local only: never consensus input.
+	Score int64 `json:"score,omitempty"`
 }
 
 type addrCacheFile struct {
@@ -219,6 +222,24 @@ func (m *AddrManager) MarkSuccess(record map[string]any) {
 	})
 }
 
+// SetScore persists the local reputation score of an address (local only).
+func (m *AddrManager) SetScore(record map[string]any, score int64) {
+	if m == nil || record == nil {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	entry, ok := m.entries[AddrKey(record)]
+	if !ok {
+		return
+	}
+	if entry.Score == score {
+		return
+	}
+	entry.Score = score
+	m.dirty = true
+}
+
 // MarkFailure increments the failure counter and returns true when the entry
 // was evicted (maxAddrFailures reached).
 func (m *AddrManager) MarkFailure(record map[string]any) bool {
@@ -335,6 +356,9 @@ func (m *AddrManager) Select(limit int) []map[string]any {
 		}
 	}
 	sort.Slice(tried, func(i, j int) bool {
+		if tried[i].entry.Score != tried[j].entry.Score {
+			return tried[i].entry.Score > tried[j].entry.Score
+		}
 		if tried[i].entry.LastTried != tried[j].entry.LastTried {
 			return tried[i].entry.LastTried < tried[j].entry.LastTried
 		}

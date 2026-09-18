@@ -113,6 +113,11 @@ type Node struct {
 	registry        *PeerRegistry
 	syncInFlight    atomic.Bool
 
+	// Local peer management: scores, bans and inbound reservations.
+	peerScores     map[string]*peerScoreState
+	inboundIPs     map[string]int
+	inboundSubnets map[string]int
+
 	// Wide-area discovery: persisted address manager and outbound dialer.
 	addrman      *AddrManager
 	outboundDial outboundDialFunc
@@ -175,6 +180,9 @@ func NewNodeWithStore(config NodeConfig, identity *ledger.NodeIdentity, kv store
 }
 
 func newNode(config NodeConfig, identity *ledger.NodeIdentity, kv store.KeyValueStore) (*Node, error) {
+	if err := config.Validate(); err != nil {
+		return nil, err
+	}
 	config.GenesisAllocations = NormalizeGenesisKeys(config.GenesisAllocations)
 
 	if identity == nil {
@@ -246,6 +254,14 @@ func newNode(config NodeConfig, identity *ledger.NodeIdentity, kv store.KeyValue
 			"reorgs":                     0,
 			"slashing_events":            0,
 			"governance_changes":         0,
+			"peer_penalties":             0,
+			"peers_banned":               0,
+			"peers_rejected_inbound":     0,
+			"peers_rejected_subnet":      0,
+			"peers_rejected_banned":      0,
+			"peer_malformed_messages":    0,
+			"peer_rate_limit_hits":       0,
+			"peer_invalid_records":       0,
 		},
 		lastSeenBlockIndex: blockchain.Tip().Index,
 		chainHashes:        map[string]struct{}{},
@@ -258,6 +274,9 @@ func newNode(config NodeConfig, identity *ledger.NodeIdentity, kv store.KeyValue
 		transactionPool:    []*ledger.Transaction{},
 		poolTxIDs:          map[string]struct{}{},
 		seenTxGossip:       map[string]struct{}{},
+		peerScores:         map[string]*peerScoreState{},
+		inboundIPs:         map[string]int{},
+		inboundSubnets:     map[string]int{},
 	}
 	for _, block := range blockchain.Chain {
 		node.chainHashes[block.CurrentBlockHash] = struct{}{}
@@ -329,6 +348,16 @@ func (n *Node) Start(ctx context.Context) error {
 	}
 	n.bootstrap(runCtx)
 	n.refreshPeerSelection()
+	if n.config.PublicDevnet {
+		n.mu.Lock()
+		controllers := len(n.controllerNodes)
+		n.mu.Unlock()
+		if controllers == 0 {
+			log.Printf("WARNING: public devnet mode is enabled but the effective controller set is empty; "+
+				"block production will not be pre-committed until %d controller(s) are discovered (check SAN_DNS_SEEDS/SAN_BOOTSTRAP)",
+				n.config.ControllerCount)
+		}
+	}
 	n.wg.Add(2)
 	go func() { defer n.wg.Done(); n.peerHealthLoop(runCtx) }()
 	go func() { defer n.wg.Done(); n.blockProductionLoop(runCtx) }()
@@ -365,9 +394,7 @@ func (n *Node) Stop() {
 		}
 	}
 	if n.addrman != nil {
-		if err := n.addrman.Save(); err != nil {
-			log.Printf("Cannot save the peer cache: %v", err)
-		}
+		n.saveAddrman()
 	}
 	for _, server := range n.servers {
 		server.Stop()
@@ -909,18 +936,20 @@ func (n *Node) MetricsSnapshot() map[string]any {
 		totalStake += stake
 	}
 	result := map[string]any{
-		"height":            height,
-		"finalized_height":  n.finalizedHeight,
-		"peers":             int64(len(n.PEERS)),
-		"controllers":       int64(len(n.controllerNodes)),
-		"mempool":           int64(len(n.transactionPool)),
-		"validators":        int64(len(active)),
-		"total_stake_units": totalStake,
-		"total_slashed":     n.blockchain.TotalSlashed,
-		"total_burned":      n.blockchain.TotalBurned,
-		"base_fee":          n.blockchain.BaseFee,
-		"contracts":         int64(len(n.storage.Contracts)),
-		"orphans":           int64(len(n.orphans)),
+		"height":             height,
+		"finalized_height":   n.finalizedHeight,
+		"peers":              int64(len(n.PEERS)),
+		"controllers":        int64(len(n.controllerNodes)),
+		"controllers_target": int64(n.config.ControllerCount),
+		"mempool":            int64(len(n.transactionPool)),
+		"validators":         int64(len(active)),
+		"total_stake_units":  totalStake,
+		"total_slashed":      n.blockchain.TotalSlashed,
+		"total_burned":       n.blockchain.TotalBurned,
+		"base_fee":           n.blockchain.BaseFee,
+		"contracts":          int64(len(n.storage.Contracts)),
+		"orphans":            int64(len(n.orphans)),
+		"peer_bans_active":   n.activePeerBansLocked(),
 	}
 	n.mu.Unlock()
 

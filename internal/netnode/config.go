@@ -3,6 +3,7 @@
 package netnode
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -20,6 +21,18 @@ const (
 	DefaultOutboundPeers = 8
 	// DefaultPeerCacheFile is the address-manager file name.
 	DefaultPeerCacheFile = "peers-cache.json"
+
+	// Local peer management defaults (see peerscore.go).
+	DefaultMaxInboundPerIP      = 16
+	DefaultMaxInboundPerSubnet  = 64
+	DefaultMaxPeersPerSubnet    = 16
+	DefaultMaxOutboundPerSubnet = 2
+	DefaultPeerBanSeconds       = 60.0
+	DefaultPeerBanMaxSeconds    = 24 * 60 * 60.0
+	// DefaultPublicDevnetMinControllers is the minimum configured controller
+	// target accepted in public-devnet mode when SAN_CONTROLLER_MIN_COUNT is
+	// unset.
+	DefaultPublicDevnetMinControllers = 3
 )
 
 // DefaultChainID is the devnet chain id.
@@ -95,6 +108,17 @@ type NodeConfig struct {
 	APIHost  string // REST bind host; empty means Host
 	APIToken string // optional bearer token
 
+	// Public-devnet profile: controller quorum preflight, local peer caps and
+	// peer scoring limits. Dev/bootstrap mode keeps the permissive defaults.
+	PublicDevnet         bool // SAN_PUBLIC_DEVNET
+	ControllerMinCount   int  // minimum configured controller target (public devnet)
+	MaxInboundPerIP      int  // concurrent inbound sessions per IP
+	MaxInboundPerSubnet  int  // concurrent inbound sessions per /24 (v4) or /64 (v6)
+	MaxPeersPerSubnet    int  // peer-table entries per /24 (v4) or /64 (v6)
+	MaxOutboundPerSubnet int  // outbound dial slots per subnet
+	PeerBanSeconds       float64
+	PeerBanMaxSeconds    float64
+
 	// Faucet (enabled with SAN_FAUCET=1). Amounts are in base units.
 	FaucetEnabled  bool
 	FaucetAmount   int64
@@ -151,6 +175,13 @@ func DefaultNodeConfig() NodeConfig {
 		FaucetAmount:       10 * ledger.SANBase,
 		FaucetMax:          100 * ledger.SANBase,
 		FaucetCooldown:     60.0,
+
+		MaxInboundPerIP:      DefaultMaxInboundPerIP,
+		MaxInboundPerSubnet:  DefaultMaxInboundPerSubnet,
+		MaxPeersPerSubnet:    DefaultMaxPeersPerSubnet,
+		MaxOutboundPerSubnet: DefaultMaxOutboundPerSubnet,
+		PeerBanSeconds:       DefaultPeerBanSeconds,
+		PeerBanMaxSeconds:    DefaultPeerBanMaxSeconds,
 	}
 }
 
@@ -316,7 +347,64 @@ func NodeConfigFromEnv() NodeConfig {
 	config.FaucetAmount = envSANUnits("SAN_FAUCET_AMOUNT", 10.0)
 	config.FaucetMax = envSANUnits("SAN_FAUCET_MAX", 100.0)
 	config.FaucetCooldown = envFloat("SAN_FAUCET_COOLDOWN", 60.0)
+	config.PublicDevnet = envBool("SAN_PUBLIC_DEVNET", false)
+	config.ControllerMinCount = int(envInt("SAN_CONTROLLER_MIN_COUNT", 0))
+	config.MaxInboundPerIP = int(envInt("SAN_MAX_INBOUND_PER_IP", DefaultMaxInboundPerIP))
+	config.MaxInboundPerSubnet = int(envInt("SAN_MAX_INBOUND_PER_SUBNET", DefaultMaxInboundPerSubnet))
+	config.MaxPeersPerSubnet = int(envInt("SAN_MAX_PEERS_PER_SUBNET", DefaultMaxPeersPerSubnet))
+	config.MaxOutboundPerSubnet = int(envInt("SAN_OUTBOUND_PER_SUBNET", DefaultMaxOutboundPerSubnet))
+	config.PeerBanSeconds = envFloat("SAN_PEER_BAN_SECONDS", DefaultPeerBanSeconds)
+	config.PeerBanMaxSeconds = envFloat("SAN_PEER_BAN_MAX_SECONDS", DefaultPeerBanMaxSeconds)
 	return config
+}
+
+// effectiveControllerMinCount is the controller target floor: an explicit
+// SAN_CONTROLLER_MIN_COUNT or the public-devnet default.
+func (config NodeConfig) effectiveControllerMinCount() int {
+	if config.ControllerMinCount > 0 {
+		return config.ControllerMinCount
+	}
+	if config.PublicDevnet {
+		return DefaultPublicDevnetMinControllers
+	}
+	return 0
+}
+
+// Validate applies the public-devnet preflight: a controller quota that can
+// never be met or a node with no way to learn peers is a startup error, so an
+// operator finds out immediately instead of running a public node with an
+// empty controller set.
+func (config NodeConfig) Validate() error {
+	if !config.PublicDevnet {
+		return nil
+	}
+	minimum := config.effectiveControllerMinCount()
+	if config.ControllerCount < minimum {
+		return fmt.Errorf(
+			"public devnet mode requires SAN_CONTROLLER_COUNT >= %d (configured %d); "+
+				"set SAN_CONTROLLER_MIN_COUNT to lower the floor deliberately",
+			minimum, config.ControllerCount)
+	}
+	if !config.WideAreaConfigured() && !config.DiscoveryEnabled && !config.peerCacheExists() {
+		return fmt.Errorf(
+			"public devnet mode requires a peer source: set SAN_DNS_SEEDS, SAN_BOOTSTRAP, " +
+				"SAN_DISCOVERY=1 or a persisted peer cache")
+	}
+	if config.MaxInboundPerIP <= 0 || config.MaxPeersPerSubnet <= 0 {
+		return fmt.Errorf("public devnet mode requires positive inbound/subnet peer caps")
+	}
+	return nil
+}
+
+// peerCacheExists reports whether a persisted address book is available as a
+// recovery path.
+func (config NodeConfig) peerCacheExists() bool {
+	path := config.ResolvedPeerCachePath()
+	if path == "" {
+		return false
+	}
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir()
 }
 
 // splitList parses a comma-separated list, dropping empty entries.

@@ -204,10 +204,11 @@ uses a Bitcoin-style address manager plus explicit seeds
   `host:peer_port`.
 
 **Addrman.** A bounded (`SAN_MAX_ADDR_ENTRIES`, default 1024) map of entries
-with `record`, `source`, `first_seen`, `last_seen`, `last_tried`, `failures`
-and a `tried` flag. When full, untried and least-recently-seen entries are
-evicted first. Entries idle for 30 days are dropped on load. The set is
-persisted atomically (0600) to `SAN_PEERS_CACHE`, default
+with `record`, `source`, `first_seen`, `last_seen`, `last_tried`, `failures`,
+a local `score` (see **Peer scoring, bans and inbound caps** below) and a
+`tried` flag. When full, untried and least-recently-seen entries are evicted
+first. Entries idle for 30 days are dropped on load. The set is persisted
+atomically (0600) to `SAN_PEERS_CACHE`, default
 `<SAN_DB_PATH dir>/peers-cache.json` (or `~/.san/peers-cache.json`), every
 60 seconds while dirty and on a graceful `Stop()`. Persisted records are not
 re-validated against `SAN_PEER_TTL` (signatures age out); a cached address can
@@ -216,8 +217,10 @@ worst waste a dial.
 
 **Outbound slots.** `outboundLoop` (every `SAN_DISCOVERY_INTERVAL`, capped at
 5 s) keeps up to `SAN_OUTBOUND_PEERS` (default 8) outbound candidates
-connected. It selects eligible addresses, dials them with the TLS-aware
-transport, asks for their peer list (gRPC `Bootstrap`; a plain
+connected. It selects eligible addresses, caps how many slots a single subnet
+may take (`SAN_OUTBOUND_PER_SUBNET`, default 2; over-cap candidates are only
+used as a fallback when the address book has nothing else), dials them with
+the TLS-aware transport, asks for their peer list (gRPC `Bootstrap`; a plain
 `OpenSession` + `GET_PEERS` + `PEER_UPDATE` fallback), then calls
 `requestPeers` and one bounded `requestSync`. Failures set an exponential
 backoff (`5 s * 2^failures`, capped at 15 min); after 5 consecutive failures
@@ -242,9 +245,29 @@ same case and never leaves `127.0.0.1`.
 
 **Eclipse resistance.** A node keeps its cached address book across restarts
 and prefers a tried/new mix, so a single seed cannot replace the whole peer
-set; outbound slots are filled from the manager, not only from gossip. There
-is no per-IP subnet bucketing or feeler connection yet (see
-[Status / limitations](#status--limitations)).
+set; outbound slots are filled from the manager with a per-subnet cap and are
+not driven only by gossip. Inbound sessions are capped per IP
+(`SAN_MAX_INBOUND_PER_IP`, default 16) and per subnet
+(`SAN_MAX_INBOUND_PER_SUBNET`, default 64; IPv4 /24, IPv6 /64); the peer table
+is capped per subnet (`SAN_MAX_PEERS_PER_SUBNET`, default 16). Feeler
+connections (probing random addresses to learn the real topology) are still
+not implemented; see [Status / limitations](#status--limitations).
+
+**Peer scoring, bans and inbound caps.** `internal/netnode/peerscore.go` keeps
+a deterministic local score per peer identity (public key, or dial endpoint
+without one). Signals: `+2` health check / valid block, `+1` valid transaction
+or accepted inbound session, `-1` duplicate, `-4` invalid finality vote, `-5`
+malformed message or bad record, `-3` timeout, `-20` rate-limit abuse. A score
+at or below `-50` triggers a temporary ban whose cooldown starts at
+`SAN_PEER_BAN_SECONDS` (default 60 s) and doubles per repeat up to
+`SAN_PEER_BAN_MAX_SECONDS` (default 24 h); banned identities are refused in the
+handshake and by `addPeer`. Scores and ban counters are local only - they are
+never consensus input. The score table is bounded (`max(64, 8 * SAN_MAX_PEERS)`
+entries, least-recently-seen evicted first), the useful score is persisted in
+the address cache, and counters are exported as `san_peer_penalties`,
+`san_peers_banned`, `san_peers_rejected_inbound`, `san_peers_rejected_subnet`,
+`san_peers_rejected_banned`, `san_peer_malformed_messages`,
+`san_peer_rate_limit_hits` and `san_peer_invalid_records`.
 
 ---
 
@@ -307,7 +330,8 @@ controllers = selectControllers()
 Controller selection (`selectControllers`, `node_peers.go:233`):
 
 1. `epoch = tip_index / max(SAN_EPOCH_LENGTH, 1)` (default epoch length 100).
-2. A peer is eligible when its record has a `public_key`; if
+2. A peer is eligible when its record has a `public_key` and a signed
+   timestamp no older than `SAN_PEER_TTL` (default 300 s); if
    `SAN_CONTROLLER_MIN_STAKE > 0`, the balance of the address derived from
    that key must be `>= controller_min_stake` (liquid balance, not stake).
 3. Score each eligible peer with `sha256("{epoch}:{public_key}")` and rank
@@ -543,6 +567,9 @@ retry policy is a strict extension that changes nothing on the wire.
 | Message size cap | `grpc.MaxRecvMsgSize`/`MaxSendMsgSize` set to `SAN_WS_MAX_SIZE` (default 1 MiB) on server and client (`BuildServer`, `dialPeer`). |
 | Controller vote verification | approval responses are checked for chain id, block hash, advertised public key and signature before counting (`requestBlockVote`, `node_sync.go:509`). |
 | Peer record freshness | ±`SAN_PEER_TTL` (default 300 s) and signature verification; unsigned records rejected by default. |
+| Inbound caps | concurrent inbound sessions per IP (`SAN_MAX_INBOUND_PER_IP`, 16) and per subnet (`SAN_MAX_INBOUND_PER_SUBNET`, 64; v4 /24, v6 /64); the peer table is capped per subnet (`SAN_MAX_PEERS_PER_SUBNET`, 16). |
+| Peer scoring and bans | local signals (valid traffic, malformed messages, timeouts, rate-limit abuse) feed a bounded score table; score `<= -50` bans the identity with exponential cooldown (`SAN_PEER_BAN_SECONDS`, `SAN_PEER_BAN_MAX_SECONDS`). Local only, never consensus. |
+| Controller freshness | controller records older than `SAN_PEER_TTL` are filtered from `selectControllers`; `SAN_PUBLIC_DEVNET=1` requires a minimum target and a peer source and warns on an empty effective set. |
 | Dead-peer claims | `DEAD_PEER` is not trusted; eviction requires the local ping threshold. |
 | Orphan/request bounds | `SAN_MAX_ORPHANS` buffered fork blocks, `SAN_MAX_REORG_DEPTH` reorg bound, 512 in-flight block requests (reset when exceeded). |
 | TLS | server certificate from `SAN_TLS_CERT`/`SAN_TLS_KEY`; clients verify with `SAN_TLS_CA` or the system trust store; with TLS the peer host is pinned via `grpc.WithAuthority(host)` for self-signed certificates (`dialPeer`, `TransportClientCredentials`). `sanup cert --ca-only` creates one shared devnet CA and `sanup cert --ca-dir` signs per-node certificates from it (the CA key never leaves the CA machine); see [public-devnet.md](public-devnet.md#2-shared-devnet-ca). |
@@ -590,6 +617,11 @@ retry policy is a strict extension that changes nothing on the wire.
 | `SAN_PEERS_CACHE` (addrman file) | `<db dir>/peers-cache.json` | `internal/netnode/config.go` |
 | Addrman flush / stale TTL | 60 s / 30 days | `internal/netnode/outbound.go`, `internal/netnode/addrman.go` |
 | Reconnect backoff | `5 s * 2^failures`, max 15 min, evict at 5 | `internal/netnode/addrman.go` |
+| `SAN_MAX_INBOUND_PER_IP` / `SAN_MAX_INBOUND_PER_SUBNET` | 16 / 64 | `internal/netnode/config.go` |
+| `SAN_MAX_PEERS_PER_SUBNET` / `SAN_OUTBOUND_PER_SUBNET` | 16 / 2 | `internal/netnode/config.go` |
+| `SAN_PEER_BAN_SECONDS` / `SAN_PEER_BAN_MAX_SECONDS` | 60 s / 24 h | `internal/netnode/config.go` |
+| Peer ban threshold / score table bound | `-50` / `max(64, 8 * SAN_MAX_PEERS)` | `internal/netnode/peerscore.go` |
+| `SAN_PUBLIC_DEVNET` / `SAN_CONTROLLER_MIN_COUNT` | off / 0 (public-devnet default floor 3) | `internal/netnode/config.go` |
 
 ---
 
@@ -599,9 +631,11 @@ retry policy is a strict extension that changes nothing on the wire.
   (`network/Node.py`) share the JSON message vocabulary, chain-id binding and
   handshake rules; the Go tests include a two-node P2P test
   (`internal/netnode/node_p2p_test.go`) and a live PEERS/GET_BLOCK exchange
-  over gRPC (`internal/netnode/node_peers_wiring_test.go`). There is no
-  cross-language live network test, so message-level compatibility has not
-  been exercised Go-to-Python in this repository.
+  over gRPC (`internal/netnode/node_peers_wiring_test.go`). Cross-language
+  compatibility is exercised by the opt-in harness
+  `internal/netnode/interop_live_test.go` (`go test -tags interop`), which
+  starts Go and Python nodes together; the verified matrix and the remaining
+  asymmetries are documented in [interop.md](interop.md).
 * **`GET_PEERS`/`PEERS` client path is Go-only.** Go answers `GET_PEERS` with
   its raw stored record list (exactly like Python) and now also asks:
   bootstrap, the health loop and a successful sync call `requestPeers`, which
@@ -651,10 +685,13 @@ retry policy is a strict extension that changes nothing on the wire.
   address manager, outbound slots and the peer cache have no Python
   counterpart, but no wire message changed, so a Go node can bootstrap from
   and gossip with Python nodes; only Go nodes benefit from the cache/backoff.
-* **No subnet bucketing or feeler connections yet.** The addrman is a flat,
-  bounded set with a tried/new mix and per-entry backoff; it does not bucket by
-  /16 (or IPv6 /32) and does not probe random addresses. This is weaker than
-  Bitcoin's eclipse resistance and is a documented residual risk.
+* **No feeler connections yet.** The addrman is a flat, bounded set with a
+  tried/new mix, per-entry backoff, per-subnet caps and local peer scoring; it
+  still does not actively probe random addresses to learn the real topology.
+  DNS seeds remain a centralization point. This is weaker than Bitcoin's
+  eclipse resistance and is a documented residual risk. Regression tests:
+  `TestSubnetPeerTableCap`, `TestSelectOutboundPlanKeepsSubnetDiversity`,
+  `TestPeerBanExponentialCooldown`.
 * **Graceful stop on Linux/macOS.** `sanup --stop` verifies the recorded pid
   is really the staged `sanup-node` binary (`/proc/<pid>/exe`, with a cmdline
   fallback) before signalling, sends `SIGTERM`, waits up to 15 s for the

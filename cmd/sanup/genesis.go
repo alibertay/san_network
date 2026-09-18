@@ -312,9 +312,14 @@ func buildChildEnv(opts options, dataDir, keyFile, publicKey string, rewardAddre
 		"SAN_KEY_FILE":            keyFile,
 		"SAN_REWARD_ADDRESS":      rewardAddress,
 		"SAN_BLOCK_THRESHOLD_FEE": "0.0001",
-		"SAN_CONTROLLER_COUNT":    "0",
 		"SAN_DISCOVERY_INTERVAL":  "2",
 		"SAN_CHAIN_ID":            opts.chainID,
+	}
+	// Dev/bootstrap nodes select no controllers; public-devnet mode keeps the
+	// operator's SAN_CONTROLLER_COUNT (or the config default) so the preflight
+	// can enforce the minimum controller set.
+	if !sanupEnvTruthy("SAN_PUBLIC_DEVNET") {
+		overrides["SAN_CONTROLLER_COUNT"] = "0"
 	}
 	// A systemd EnvironmentFile (or a shell export) may select LMDB and a
 	// persistent database path; only fall back to the devnet memory defaults
@@ -389,6 +394,16 @@ func buildChildEnv(opts options, dataDir, keyFile, publicKey string, rewardAddre
 
 func anyToString(value any) string {
 	return fmt.Sprintf("%v", value)
+}
+
+// sanupEnvTruthy reports whether a SAN_* environment flag is enabled.
+func sanupEnvTruthy(name string) bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv(name))) {
+	case "1", "true", "yes", "on":
+		return true
+	default:
+		return false
+	}
 }
 
 // anyToInt64 accepts the canonical JSON scalar shapes (int64, float64, string,

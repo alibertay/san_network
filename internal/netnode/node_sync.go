@@ -614,17 +614,18 @@ func (n *Node) serveBlockVote(ctx context.Context, stream *PeerStream, data map[
 	_ = stream.Send(ctx, string(message))
 }
 
-// handleIncomingBlock processes a BLOCK message.
-func (n *Node) handleIncomingBlock(ctx context.Context, data map[string]any) {
+// handleIncomingBlock processes a BLOCK message and reports whether the block
+// was accepted into the local chain state.
+func (n *Node) handleIncomingBlock(ctx context.Context, data map[string]any) bool {
 	blockData, ok := data["block"].(map[string]any)
 	if !ok {
 		log.Printf("Received malformed block")
-		return
+		return false
 	}
 	block, err := ledger.BlockFromDict(blockData)
 	if err != nil {
 		log.Printf("Received malformed block: %v", err)
-		return
+		return false
 	}
 	n.clearBlockMisses(block.CurrentBlockHash)
 
@@ -674,6 +675,7 @@ func (n *Node) handleIncomingBlock(ctx context.Context, data map[string]any) {
 			n.requestBlock(context.Background(), block.PreviousBlockHash)
 		}
 	}
+	return accepted
 }
 
 // GossipBlock gossips a block once; deduplication keeps the network loop-free.

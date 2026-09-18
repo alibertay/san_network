@@ -85,8 +85,17 @@ asks its **controller set** for signed votes
 * Records are deduplicated before asking: a repeated record, or several
   addresses advertising the same `public_key`, counts once, so one signing key
   cannot inflate the quorum.
+* Stale records are dropped from the selection: a peer record whose signed
+  timestamp is older than `SAN_PEER_TTL` (default 300 s) no longer counts as a
+  controller, so a node that stopped re-announcing ages out of the pre-commit
+  set instead of blocking it indefinitely.
 * With an empty controller set the block is accepted locally (bootstrap /
-  single-node mode).
+  single-node mode). `SAN_PUBLIC_DEVNET=1` makes this a startup concern: the
+  target must be at least `SAN_CONTROLLER_MIN_COUNT` (default
+  `3`), a peer source must be configured, and a node that still has no
+  effective controllers logs a clear startup `WARNING`. Prometheus exposes
+  `san_controllers` (effective) next to `san_controllers_target` (configured
+  target).
 
 Controller selection (`selectControllers`,
 `internal/netnode/node_peers.go:233`; `Node._select_controllers`,
@@ -103,8 +112,11 @@ Controller selection (`selectControllers`,
   add/remove, health checks and bootstrap.
 
 Controllers are a **local view**: each node selects from its own peer table.
-Controller quorum is an availability gate, not the safety proof - finality
-(section 4) is. This is discussed in [threat model](#9-threat-model-and-limits).
+Controller quorum is an availability/pre-commit gate, **not finality**: a block
+that reaches controller quorum is still only *committed locally* and can be
+replaced by a longer valid branch; the safety proof is stake-weighted 2/3
+finality (section 4). Do not treat a controller approval as irreversible. This
+is discussed in [threat model](#9-threat-model-and-limits).
 
 ### 1.4 Bootstrap mode
 

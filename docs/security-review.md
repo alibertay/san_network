@@ -135,12 +135,17 @@ VPSs; each entry below states the new status.
    separated), a persisted address manager (`SAN_PEERS_CACHE`), outbound
    slots (`SAN_OUTBOUND_PEERS`, default 8), reconnect backoff and gossip-fed
    addresses implement the wide-area path; the file registry and loopback
-   probe are documented fallbacks only. Evidence: `addrman_test.go`,
+   probe are documented fallbacks only. Inbound sessions are capped per IP and
+   per /24 (v4) or /64 (v6), the peer table is capped per subnet, outbound
+   slots keep per-subnet diversity, and a local score/ban table rejects
+   abusive or malformed peers (`peerscore.go`, `TestInboundCapsPerIPAndSubnet`,
+   `TestSubnetPeerTableCap`, `TestSelectOutboundPlanKeepsSubnetDiversity`,
+   `TestPeerBanExponentialCooldown`). Evidence: `addrman_test.go`,
    `dnsseed_test.go`, `outbound_test.go`, `gossip_addrman_test.go` and the
    two-node bootstrap/cache/restart test `wide_area_test.go`. Residual: no
-   subnet bucketing or feeler connections (see `docs/gossip.md` limitations),
-   and DNS seeds remain a centralization/censorship point mitigated by
-   bootstrap lists and the cache.
+   feeler connections (see `docs/gossip.md` limitations), and DNS seeds remain
+   a centralization/censorship point mitigated by bootstrap lists and the
+   cache.
 5. **Outbound-flow-control goroutine leak (F15) is fixed.**
    `PeerStream.Close` waits at most 500 ms for the sender, then closes the
    gRPC connection to unblock a sender stuck in flow control; `CloseSend` is

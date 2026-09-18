@@ -54,9 +54,22 @@ func (n *Node) outboundLoop(ctx context.Context) {
 	}
 }
 
-// saveAddrman flushes the address cache when it has changes.
+// saveAddrman flushes the address cache when it has changes, copying the
+// local peer scores into the persisted entries first so useful reputation
+// survives restarts.
 func (n *Node) saveAddrman() {
-	if n.addrman == nil || !n.addrman.Dirty() {
+	if n.addrman == nil {
+		return
+	}
+	n.mu.Lock()
+	for _, peer := range n.PEERS {
+		key := peerIdentityKey(peer)
+		if state, ok := n.peerScores[key]; ok {
+			n.addrman.SetScore(peer, state.Score)
+		}
+	}
+	n.mu.Unlock()
+	if !n.addrman.Dirty() {
 		return
 	}
 	if err := n.addrman.Save(); err != nil {
@@ -81,8 +94,10 @@ func (n *Node) maintainOutbound(ctx context.Context) {
 		return
 	}
 	needed := n.config.OutboundPeers - peerCount
-	// Over-select so self/duplicate entries do not waste the budget.
+	// Over-select so self/duplicate entries do not waste the budget, then cap
+	// how many slots one subnet may occupy (eclipse resistance).
 	candidates := n.addrman.Select(needed * 3)
+	candidates = n.selectOutboundPlan(candidates)
 	attempts := 0
 	for _, record := range candidates {
 		if attempts >= needed {
@@ -97,6 +112,7 @@ func (n *Node) maintainOutbound(ctx context.Context) {
 		n.addrman.MarkTried(record)
 		if n.dialOutbound(ctx, record) {
 			n.addrman.MarkSuccess(record)
+			n.notePeerSignal(record, scoreSignalHealth)
 			continue
 		}
 		if n.addrman.MarkFailure(record) {

@@ -22,13 +22,13 @@ must be resolved before announcing the devnet.
 
 - [ ] 10-node devnet startup verified end to end
 - [ ] 10-node test with independent data directories and ports
-- [ ] Partition scenarios A-D automated (5/5, 7/3, proposer isolation, full split)
+- [x] Partition scenarios A-D automated (5/5, 7/3, proposer isolation, full split)
 - [ ] Long-running soak test (`cmd/sansoak`) passes for the agreed duration
 - [x] Fork-choice torture suite (randomized branches, delayed parents)
 - [ ] Crash-consistency tests (kill during commit/finality/prune) pass
 - [x] Validator churn suite (join, undelegate, withdraw, slash) passes
 - [x] Finality stress suite (out-of-order, duplicate, conflicting votes) passes
-- [ ] Mixed Go/Python implementation policy documented and enforced in code
+- [x] Mixed Go/Python implementation policy documented and enforced in code
 
 ## Persistence and recovery
 
@@ -45,7 +45,7 @@ must be resolved before announcing the devnet.
 - [x] Private keys and API tokens never logged
 - [ ] Public-devnet config profile (`deploy/san.env.example`) reviewed and frozen
 - [ ] Production nodes refuse development defaults (no in-memory DB, no open faucet)
-- [ ] Controller count and minimum stake validated at startup with clear warnings
+- [x] Controller count and minimum stake validated at startup with clear warnings
 - [ ] API token required (or reverse proxy enforced) for public REST exposure
 
 ## Observability and operations
@@ -100,9 +100,14 @@ until the corresponding work lands.
   slow validators are not penalized on-chain.
 - **Controller quorum is not finality.** Controller approvals are an
   availability/pre-commit gate; finality comes from stake-weighted 2/3 votes.
-- **Eclipse and Sybil risk.** Addrman bucketing is simplified, DNS seeds are a
-  centralization point, and peer reputation is local only. Seed lists must be
-  diversified and monitored.
+- **Eclipse and Sybil risk.** Addrman bucketing is simplified (per-subnet caps
+  on inbound sessions, the peer table and outbound slots; no feeler
+  connections), DNS seeds are a centralization point, and peer reputation
+  (scoring, temporary bans, persisted score in the peer cache) is local only.
+  Seed lists must be diversified and monitored. Regression tests:
+  `TestInboundCapsPerIPAndSubnet`, `TestSubnetPeerTableCap`,
+  `TestSelectOutboundPlanKeepsSubnetDiversity`, `TestPeerBanExponentialCooldown`,
+  `TestAddrmanPersistsPeerScore`.
 - **Weak subjectivity / long-range protection is not implemented.** A new node
   trusts the genesis fingerprint and the peer set it learns from.
 - **Limited production history.** No long-running public deployment yet; crash
@@ -112,16 +117,24 @@ until the corresponding work lands.
 - **TLS trust equals genesis trust.** Without TLS (or with a shared devnet CA),
   a network-level attacker could serve a different genesis to a joining node.
 - **Mixed-implementation policy.** Python remains the reference and fixture
-  source; the Go node is the canonical protocol implementation. Live Go/Python
-  interoperability is not continuously tested. Three Go-only hardenings differ
-  from the Python reference without changing wire rules or block validity: a
+  source; the Go node is the canonical protocol implementation
+  (`docs/interop.md`). The opt-in harness
+  (`go test -tags interop ./internal/netnode -run TestInterop`, skipped
+  cleanly without Python) verifies Go-vs-Go and live Go/Python genesis
+  agreement, handshake, transfer/block propagation, stake deposit, sync
+  catch-up, state roots and contract deploy; SANRC20 transfers, on-chain
+  undelegate/withdraw, governance and finality-vote gossip across
+  implementations are not automated yet. Go-only hardenings that differ from
+  the Python reference without changing wire rules or block validity: a
   persisted finality checkpoint that contradicts the canonical chain is a
   fatal startup error instead of a logged ignore, controller records are
-  deduplicated by signing key before the approval count, and a replaced
-  branch's verified blocks are retained as orphans so a longer branch
-  descending from them does not wait for a re-fetch. Regression tests:
+  deduplicated by signing key and stale ones dropped from selection, and a
+  replaced branch's verified blocks are retained as orphans. Regression tests:
   `TestPersistedFinalityContradictionFailsStartup`, `TestDedupeControllers`,
-  `TestReorgRetainsAbandonedBranchAncestors`.
+  `TestStaleControllerRecordIsDropped`,
+  `TestReorgRetainsAbandonedBranchAncestors`. Known asymmetry Interop-1:
+  Python's `Bootstrap` RPC omits its own signed record (harness uses the REST
+  fallback; documented in `docs/interop.md`).
 - **External security audit has not been performed.** The published review is an
   internal, automated/adversarial code review (`docs/security-review.md`).
 

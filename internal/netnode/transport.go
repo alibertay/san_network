@@ -63,6 +63,8 @@ type NodeTransport interface {
 	VerifyHello(data map[string]any) bool
 	SelfPeerRecord() map[string]any
 	NoteInboundPeer(address string)
+	AdmitInboundPeer(address string) bool
+	ReleaseInboundPeer(address string)
 }
 
 // PeerStream is a JSON-message session over a gRPC bidirectional stream.
@@ -74,6 +76,9 @@ type PeerStream struct {
 	closed        atomic.Bool
 	closeCallback func()
 	Label         string
+	// PeerKey is the authenticated public key learned from the handshake
+	// ("" before the handshake completes).
+	PeerKey string
 }
 
 func newPeerStream(inbound, outbound chan string, label string) *PeerStream {
@@ -173,6 +178,10 @@ func (server *p2pServer) Session(stream grpc.BidiStreamingServer[netproto.Envelo
 
 	if remote := inboundRemoteAddress(ctx); remote != "" {
 		server.node.NoteInboundPeer(remote)
+		if !server.node.AdmitInboundPeer(remote) {
+			return status.Error(codes.ResourceExhausted, "inbound peer cap reached")
+		}
+		defer server.node.ReleaseInboundPeer(remote)
 	}
 
 	label := "grpc-session"

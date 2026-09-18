@@ -39,6 +39,22 @@ san_reorgs 0
 san_slashing_events 0
 # TYPE san_governance_changes counter
 san_governance_changes 0
+# TYPE san_peer_penalties counter
+san_peer_penalties 0
+# TYPE san_peers_banned counter
+san_peers_banned 0
+# TYPE san_peers_rejected_inbound counter
+san_peers_rejected_inbound 0
+# TYPE san_peers_rejected_subnet counter
+san_peers_rejected_subnet 0
+# TYPE san_peers_rejected_banned counter
+san_peers_rejected_banned 0
+# TYPE san_peer_malformed_messages counter
+san_peer_malformed_messages 0
+# TYPE san_peer_rate_limit_hits counter
+san_peer_rate_limit_hits 0
+# TYPE san_peer_invalid_records counter
+san_peer_invalid_records 0
 # TYPE san_height gauge
 san_height 0
 # TYPE san_finalized_height gauge
@@ -63,6 +79,10 @@ san_base_fee 0
 san_contracts 0
 # TYPE san_orphans gauge
 san_orphans 0
+# TYPE san_controllers_target gauge
+san_controllers_target 0
+# TYPE san_peer_bans_active gauge
+san_peer_bans_active 0
 `
 
 func TestRenderMetricsZeroSnapshot(t *testing.T) {
