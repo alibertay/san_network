@@ -1,11 +1,15 @@
-# SAN Network — Independent Security Audit
+# SAN Network — Internal Security Review (automated/model-assisted)
 
 > **Scope:** `network/`, `blockchain/`, `SANVM/`, `app/` (consensus, network, storage, VM)
-> **Method:** Independent model review (OpenAI Codex CLI, `--sandbox read-only`) — three
-> finding rounds plus successive verification rounds. Every finding was fixed and covered by a
+> **Method:** Internal, automated/adversarial code review assisted by a model
+> (OpenAI Codex CLI, `--sandbox read-only`) — three finding rounds plus
+> successive verification rounds. Every finding was fixed and covered by a
 > regression test, then re-reviewed until the fix was confirmed closed.
+> **This is not an independent external security audit;** no third-party audit
+> has been commissioned. The Go-side review is `docs/security-review.md`.
 > **Result:** All findings are closed; the final verification round reports **no new
-> critical/high issues**. Ready for an operator-controlled devnet.
+> critical/high issues**. Ready for an operator-controlled devnet only; see the
+> known limitations in `docs/DEVNET_CHECKLIST.md`.
 > **Date:** 2026
 
 ---

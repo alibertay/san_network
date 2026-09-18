@@ -703,7 +703,8 @@ Constants compiled into the node:
 
 | Constant | Value | File |
 |----------|-------|------|
-| `ProtocolVersion` | 2 | `internal/netnode/node.go:35` |
+| `ProtocolVersion` | 3 | `internal/netnode/node.go` |
+| `LegacyProtocolVersion` | 2 (explicit legacy mode only) | `internal/netnode/node.go` |
 | `SchemaVersion` | 5 | `internal/ledger/block.go:20` |
 | `VoteLookahead` | 64 | `internal/netnode/node.go:49` |
 | `MaxStagedVotersPerHash` | 128 | `internal/netnode/node.go:50` |

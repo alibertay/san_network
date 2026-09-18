@@ -127,6 +127,12 @@ func (n *Node) loadPersistedState(store *ledger.ChainStore) error {
 	if hasFingerprint && storedFingerprint != localFingerprint {
 		return fmt.Errorf("Persisted chain was created with a different genesis allocation (SAN_GENESIS_ALLOCATION); refusing to start")
 	}
+	storedGenesis, hasGenesis := store.GetMeta("genesis_fingerprint")
+	if hasGenesis && storedGenesis != "" && !genesisFingerprintsEqual(storedGenesis, n.genesisFingerprint) {
+		return fmt.Errorf(
+			"Persisted chain was created from a different genesis (fingerprint %s, this node %s); refusing to start",
+			storedGenesis, n.genesisFingerprint)
+	}
 
 	if chain[0].Index == 0 && (len(chain) == 1 || chain[1].Index == 1) {
 		expectedGenesis := n.blockchain.Tip().CurrentBlockHash
@@ -402,6 +408,7 @@ func (n *Node) persistBlock(block *ledger.Block, receipts []any) {
 		return
 	}
 	_ = n.store.SetMeta("genesis_allocation", n.genesisAllocationFingerprint())
+	_ = n.store.SetMeta("genesis_fingerprint", n.genesisFingerprint)
 }
 
 // ---------------------------------------------------------------------- #

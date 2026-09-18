@@ -14,20 +14,23 @@ import (
 )
 
 type statusReport struct {
-	Running         bool   `json:"running"`
-	PID             int    `json:"pid,omitempty"`
-	Address         string `json:"address,omitempty"`
-	API             string `json:"api,omitempty"`
-	DataDir         string `json:"data_dir,omitempty"`
-	Height          int64  `json:"height"`
-	FinalizedHeight int64  `json:"finalized_height"`
-	Peers           int64  `json:"peers"`
-	Validators      int64  `json:"validators"`
-	Balance         string `json:"balance,omitempty"`
-	BalanceUnits    int64  `json:"balance_units"`
-	Stake           string `json:"stake,omitempty"`
-	StakeUnits      int64  `json:"stake_units"`
-	ActiveValidator bool   `json:"active_validator"`
+	Running            bool   `json:"running"`
+	PID                int    `json:"pid,omitempty"`
+	Address            string `json:"address,omitempty"`
+	API                string `json:"api,omitempty"`
+	DataDir            string `json:"data_dir,omitempty"`
+	ChainID            string `json:"chain_id,omitempty"`
+	GenesisHash        string `json:"genesis_hash,omitempty"`
+	GenesisFingerprint string `json:"genesis_fingerprint,omitempty"`
+	Height             int64  `json:"height"`
+	FinalizedHeight    int64  `json:"finalized_height"`
+	Peers              int64  `json:"peers"`
+	Validators         int64  `json:"validators"`
+	Balance            string `json:"balance,omitempty"`
+	BalanceUnits       int64  `json:"balance_units"`
+	Stake              string `json:"stake,omitempty"`
+	StakeUnits         int64  `json:"stake_units"`
+	ActiveValidator    bool   `json:"active_validator"`
 }
 
 // printStatus reports the node recorded in the data directory. It returns a
@@ -55,6 +58,14 @@ func printStatus(state nodeState, wallet string, stdout, stderr io.Writer, asJSO
 			report.FinalizedHeight = anyToInt64(health["finalized_height"])
 			report.Peers = anyToInt64(health["peers"])
 			report.Validators = anyToInt64(health["validators"])
+		}
+		if genesis, err := client.Genesis(); err == nil {
+			report.ChainID = anyToString(genesis["chain_id"])
+			report.GenesisHash = anyToString(genesis["genesis_hash"])
+			report.GenesisFingerprint = anyToString(genesis["genesis_fingerprint"])
+		}
+		if report.ChainID == "" {
+			report.ChainID = state.ChainID
 		}
 		if wallet != "" {
 			if account, err := client.Account(wallet); err == nil {
@@ -105,6 +116,15 @@ func printStatus(state nodeState, wallet string, stdout, stderr io.Writer, asJSO
 	}
 	logf(stdout, "node is running (pid %d) at %s", state.PID, report.API)
 	fmt.Fprintf(stdout, "  wallet           : %s\n", report.Address)
+	if report.ChainID != "" {
+		fmt.Fprintf(stdout, "  chain            : %s\n", report.ChainID)
+	}
+	if report.GenesisFingerprint != "" {
+		fmt.Fprintf(stdout, "  genesis          : %s\n", report.GenesisFingerprint)
+	}
+	if report.GenesisHash != "" {
+		fmt.Fprintf(stdout, "  genesis hash     : %s\n", report.GenesisHash)
+	}
 	fmt.Fprintf(stdout, "  height           : %d (finalized %d)\n", report.Height, report.FinalizedHeight)
 	fmt.Fprintf(stdout, "  peers            : %d (validators %d)\n", report.Peers, report.Validators)
 	fmt.Fprintf(stdout, "  balance          : %s SAN\n", report.Balance)

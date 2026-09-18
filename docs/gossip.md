@@ -358,7 +358,7 @@ Every session starts with a handshake; after that the dispatcher routes by
 
 | Type | Direction | Port | Purpose and flow |
 |------|-----------|------|------------------|
-| `HELLO` | initiator -> responder | any | Signed handshake: `type`, `protocol=2`, `chain_id`, `public_key`, `timestamp`, `signature`. Must be the first message. |
+| `HELLO` | initiator -> responder | any | Signed handshake: `type`, `protocol=3`, `chain_id`, `genesis` (full fingerprint), `software`, `capabilities`, `public_key`, `timestamp`, `signature`. Must be the first message. Protocol 2 is accepted only with `SAN_ALLOW_LEGACY_HANDSHAKE=1`. |
 | `HELLO_ACK` | responder -> initiator | any | Same shape; the initiator verifies it before using the session. |
 | `PING` | either | peer | Liveness probe. |
 | `PONG` | either | peer | Answer to `PING`. |
@@ -381,8 +381,9 @@ Handshake:
 ```
 initiator                                             responder
     |   gRPC Session(stream Envelope)                    |
-    |------ HELLO {protocol:2, chain_id, --------------->|
-    |        public_key, timestamp, signature}           |
+    |------ HELLO {protocol:3, chain_id, genesis, ------>|
+    |        software, capabilities, public_key,         |
+    |        timestamp, signature}                       |
     |                                                    | acceptHandshake:
     |                                                    |  type == HELLO &&
     |                                                    |  VerifyHello(data)
@@ -405,9 +406,18 @@ initiator                                             responder
     |  ...                                                |
 ```
 
-`VerifyHello` (`node.go:442`) enforces `type in {HELLO, HELLO_ACK}`,
-`protocol == 2`, matching `chain_id`, `|now - timestamp| <= HELLO_TTL`
-(60 s), and a valid signature over the record without `signature`.
+`VerifyHello` (`node.go`, `helloRejectReason` in `genesis.go`) enforces
+`type in {HELLO, HELLO_ACK}`, `protocol == ProtocolVersion` (3; 2 only in
+legacy mode), matching `chain_id`, matching full `genesis` fingerprint,
+non-empty `software`, the required capabilities
+(`genesis-fingerprint-v1`, `software-version-v1`),
+`|now - timestamp| <= HELLO_TTL` (60 s), and a valid signature over the record
+without `signature`. Rejections are counted per reason
+(`handshake_rejected_*`) and logged; the authoritative field/reason table is
+[docs/protocol.md](protocol.md).
+
+Peer records carry the same `genesis` fingerprint; `Status` and `Sync`
+payloads expose it as `genesis` and a strict node refuses a peer without it.
 
 Note that **staking and governance messages have no dedicated gossip type**:
 `deposit`/`undelegate`/`withdraw`/`evidence`/`set_param` are ordinary
@@ -582,7 +592,9 @@ retry policy is a strict extension that changes nothing on the wire.
 
 | Constant | Value | Where |
 |----------|-------|-------|
-| `ProtocolVersion` | 2 | `internal/netnode/node.go:35` |
+| `ProtocolVersion` | 3 | `internal/netnode/node.go` |
+| `LegacyProtocolVersion` | 2 (legacy mode only) | `internal/netnode/node.go` |
+| Required HELLO capabilities | `genesis-fingerprint-v1`, `software-version-v1` | `internal/netnode/genesis.go` |
 | `SessionQueueSize` | 256 | `internal/netnode/transport.go:26` |
 | `MaxConcurrentSessions` | 256 | `internal/netnode/transport.go:27` |
 | `MaxConcurrentSyncs` | 8 | `internal/netnode/transport.go:28` |

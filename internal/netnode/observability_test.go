@@ -3,10 +3,12 @@ package netnode
 import (
 	"context"
 	"net"
+	"path/filepath"
 	"testing"
 	"time"
 
 	"github.com/alibertay/san_network/internal/ledger"
+	"github.com/alibertay/san_network/internal/ledger/store"
 )
 
 // readyTestConfig is a loopback, in-memory config with random ports.
@@ -134,8 +136,12 @@ func TestReadyStateDegradedWithoutPeers(t *testing.T) {
 	config.PublicDevnet = true
 	config.DiscoveryEnabled = true
 	config.PeerRegistryPath = t.TempDir() + "/peers.json"
+	config.DBBackend = "lmdb"
+	dbPath := filepath.Join(t.TempDir(), "node.db")
+	config.DBPath = &dbPath
+	config.GenesisFingerprint, _ = GenesisFingerprintFromConfig(config)
 
-	node, err := NewNode(config, identity)
+	node, err := NewNodeWithStore(config, identity, store.NewMemoryStore(":memory:"))
 	if err != nil {
 		t.Fatalf("NewNode: %v", err)
 	}

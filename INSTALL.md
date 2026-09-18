@@ -288,6 +288,15 @@ Full walkthrough: [README](README.md#public-devnet-on-a-vps) and the
 [public devnet runbook](docs/public-devnet.md) (10-VPS setup, shared CA, DNS
 records, faucet, joiner troubleshooting).
 
+Public nodes run with `SAN_PUBLIC_DEVNET=1` and a pinned canonical genesis
+(`SAN_GENESIS_FILE=/etc/san/genesis.json`, installed from
+`deploy/genesis.json`). The profile refuses to start with `SAN_DB_BACKEND=memory`,
+`SAN_CONTROLLER_COUNT=0`, no `SAN_API_TOKEN` on a non-loopback API, a tokenless
+faucet, no genesis fingerprint or `SAN_ALLOW_LEGACY_HANDSHAKE=1`;
+`SAN_ALLOW_INSECURE_PUBLIC=1` downgrades those to warnings for tests only. The
+handshake and sync compare the full fingerprint (`docs/protocol.md`); startup
+logs print the chain id, genesis hash and fingerprint.
+
 **Open TCP ports** (defaults): `api` 8000, `p2p` 8765, `peer` 8770,
 `controller` 8769. The three gRPC ports serve the same service, so one range
 rule (`8765-8770`) is enough. Keep 8000 private unless the REST API must be
@@ -327,12 +336,13 @@ All `sanup` options are read from `SAN_*` variables, so
 
 ```bash
 # seed node (new chain)
-sanup --seed --host 0.0.0.0 --api-host 0.0.0.0 \
+sanup --public-devnet --genesis-file /etc/san/genesis.json --seed \
+    --host 0.0.0.0 --api-host 0.0.0.0 \
     --advertise-host seed.example.com --data-dir /var/lib/san/seed
 
-# joining node (wide-area discovery; peers via the seed, genesis fetched
-# from its REST port 8000)
-sanup --host 0.0.0.0 --api-host 0.0.0.0 \
+# joining node (wide-area discovery; peers via the seed, genesis pinned)
+sanup --public-devnet --genesis-file /etc/san/genesis.json \
+    --host 0.0.0.0 --api-host 0.0.0.0 \
     --advertise-host node2.example.com --seeds seed.example.com \
     --data-dir /var/lib/san/node2
 ```
@@ -340,7 +350,9 @@ sanup --host 0.0.0.0 --api-host 0.0.0.0 \
 `--seeds` accepts DNS names or `host:port`; `--bootstrap host:api_port` pins
 the genesis source explicitly. The address cache
 (`<data-dir>/peers-cache.json`, `--peer-cache FILE`) reconnects a restarted
-node without a seed. `--no-registry` disables the local registry.
+node without a seed. `--no-registry` disables the local registry. Secret
+handling (key files, CA key isolation, API tokens, rotation) is documented in
+[docs/secrets.md](docs/secrets.md).
 
 ### 11.3 TLS
 

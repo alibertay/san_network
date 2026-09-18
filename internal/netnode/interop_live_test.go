@@ -70,6 +70,10 @@ func interopConfig(ports []int, allocations map[string]int64) NodeConfig {
 	config.BlockThresholdFee = 0
 	config.RequireBlockSig = true
 	config.RequireStateRoot = true
+	// The frozen Python reference speaks protocol 2; the interop harness opts
+	// into the explicit legacy compatibility window (Batch E bump). Public
+	// devnets refuse this mode (docs/protocol.md).
+	config.AllowLegacyHandshake = true
 	return config
 }
 

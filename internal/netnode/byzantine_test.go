@@ -297,6 +297,7 @@ func TestByzantinePeerRecordFloodKeepsTableBounded(t *testing.T) {
 	for index := 0; index < 200; index++ {
 		records = append(records, map[string]any{
 			"chain_id": node.chainID,
+			"genesis":  node.genesisFingerprint,
 			"host":     "10.2.2.2",
 			"api_port": int64(20000 + index),
 		})

@@ -151,6 +151,7 @@ func TestPeerTableLimitRejectsAndCounts(t *testing.T) {
 	makePeer := func(host string, port int64) map[string]any {
 		record, ok := CompletePeer(map[string]any{
 			"host": host, "api_port": port, "chain_id": node.chainID,
+			"genesis":    node.genesisFingerprint,
 			"public_key": signer.PublicKeyHex(), "timestamp": nowSeconds(),
 		}, node.config)
 		if !ok {

@@ -510,6 +510,11 @@ func OpenSession(ctx context.Context, node NodeTransport, peer map[string]any, p
 		peerStream.Close()
 		return nil, &PeerConnectionError{Message: "handshake rejected by peer"}
 	}
+	if notifier, ok := node.(interface{ NoteLegacyHandshake() }); ok {
+		if protocol, valid := int64Strict(decoded["protocol"]); valid && protocol == LegacyProtocolVersion {
+			notifier.NoteLegacyHandshake()
+		}
+	}
 	return peerStream, nil
 }
 

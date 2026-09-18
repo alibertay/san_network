@@ -1,0 +1,16 @@
+{
+  "format_version": 1,
+  "chain_id": "san-devnet-1",
+  "allocations": {},
+  "parameters": {
+    "block_reward": "2",
+    "min_block_interval_ms": 1000,
+    "proposer_timeout_ms": 6000,
+    "block_gas_limit": 30000000,
+    "unbonding_period": 100,
+    "slash_bps": 5000,
+    "min_validator_stake": "0"
+  },
+  "validators": [],
+  "fingerprint": "18316ae0ba90922e943010858a5de447bc32636453701321b6ab351c72a8ccb8"
+}

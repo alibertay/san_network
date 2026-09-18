@@ -237,6 +237,7 @@ func TestSubnetPeerTableCap(t *testing.T) {
 	for index := 0; index < 2; index++ {
 		record := map[string]any{
 			"chain_id": node.chainID,
+			"genesis":  node.genesisFingerprint,
 			"host":     "10.1.2.3",
 			"api_port": int64(19000 + index),
 		}
@@ -246,6 +247,7 @@ func TestSubnetPeerTableCap(t *testing.T) {
 	}
 	third := map[string]any{
 		"chain_id": node.chainID,
+		"genesis":  node.genesisFingerprint,
 		"host":     "10.1.2.3",
 		"api_port": int64(19002),
 	}
@@ -257,6 +259,7 @@ func TestSubnetPeerTableCap(t *testing.T) {
 	}
 	other := map[string]any{
 		"chain_id": node.chainID,
+		"genesis":  node.genesisFingerprint,
 		"host":     "10.1.3.1",
 		"api_port": int64(19003),
 	}

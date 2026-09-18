@@ -18,8 +18,9 @@ import (
 // joiners, derives the seed address and the genesis environment from the
 // seed's REST endpoint. Explicit --bootstrap wins; otherwise a reachable node
 // in the local peer registry is used, and when there is none this node starts
-// as the founder.
-func resolveGenesis(opts options, publicKey string) (bool, string, map[string]string, error) {
+// as the founder. expectedFingerprint, when non-empty, pins the seed to the
+// same full genesis fingerprint (from a canonical genesis file).
+func resolveGenesis(opts options, publicKey, expectedFingerprint string) (bool, string, map[string]string, error) {
 	explicit := strings.TrimSpace(opts.bootstrap)
 	if opts.seed.value == "true" {
 		if explicit != "" {
@@ -32,7 +33,7 @@ func resolveGenesis(opts options, publicKey string) (bool, string, map[string]st
 		if err != nil {
 			return false, "", nil, err
 		}
-		genesisEnv, err := fetchGenesisEnv(bootstrap, opts.apiToken)
+		genesisEnv, err := fetchGenesisEnv(bootstrap, opts.apiToken, expectedFingerprint)
 		if err != nil {
 			return false, "", nil, err
 		}
@@ -61,7 +62,7 @@ func resolveGenesis(opts options, publicKey string) (bool, string, map[string]st
 		}
 		return true, "", nil, nil
 	}
-	genesisEnv, err := fetchGenesisEnv(bootstrap, opts.apiToken)
+	genesisEnv, err := fetchGenesisEnv(bootstrap, opts.apiToken, expectedFingerprint)
 	if err != nil {
 		return false, "", nil, err
 	}
@@ -227,7 +228,7 @@ func findCacheBootstrap(publicKey string, opts options) string {
 	return ""
 }
 
-func fetchGenesisEnv(bootstrap, token string) (map[string]string, error) {
+func fetchGenesisEnv(bootstrap, token, expectedFingerprint string) (map[string]string, error) {
 	base := bootstrap
 	if !strings.Contains(base, "://") {
 		scheme := "http"
@@ -242,10 +243,29 @@ func fetchGenesisEnv(bootstrap, token string) (map[string]string, error) {
 		return nil, fmt.Errorf("cannot fetch the seed's genesis from %s: %w", base, err)
 	}
 	env := genesisEnvFromPayload(payload)
-	if strings.TrimSpace(env["SAN_GENESIS_ALLOCATION"]) == "" {
+	expected := strings.TrimSpace(expectedFingerprint)
+	if expected == "" && strings.TrimSpace(env["SAN_GENESIS_ALLOCATION"]) == "" {
 		return nil, fmt.Errorf("the seed %s reported an empty genesis allocation", base)
 	}
+	if expected != "" {
+		reported := strings.TrimSpace(env["SAN_GENESIS_FINGERPRINT"])
+		if reported == "" {
+			return nil, fmt.Errorf(
+				"the seed %s does not report a full genesis fingerprint (pre-Batch-E node); "+
+					"refusing to join without a verifiable genesis", base)
+		}
+		if !strings.EqualFold(normalizeFingerprint(reported), normalizeFingerprint(expected)) {
+			return nil, fmt.Errorf(
+				"genesis mismatch: the seed %s is on %s while this node expects %s; "+
+					"refusing to join a different network", base, reported, expected)
+		}
+	}
 	return env, nil
+}
+
+func normalizeFingerprint(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	return strings.TrimPrefix(value, "sha256:")
 }
 
 // genesisEnvFromPayload mirrors scripts/run_node.py apply_genesis_parameters:
@@ -279,6 +299,11 @@ func genesisEnvFromPayload(payload map[string]any) map[string]string {
 	}
 	if chainID, ok := payload["chain_id"]; ok && chainID != nil {
 		env["SAN_CHAIN_ID"] = fmt.Sprintf("%v", chainID)
+	}
+	if fingerprint, ok := payload["genesis_fingerprint"]; ok && fingerprint != nil {
+		if text := strings.TrimSpace(fmt.Sprintf("%v", fingerprint)); text != "" {
+			env["SAN_GENESIS_FINGERPRINT"] = text
+		}
 	}
 	allocations, _ := payload["genesis_allocation"].(map[string]any)
 	addresses := make([]string, 0, len(allocations))
@@ -318,13 +343,24 @@ func buildChildEnv(opts options, dataDir, keyFile, publicKey string, rewardAddre
 	// Dev/bootstrap nodes select no controllers; public-devnet mode keeps the
 	// operator's SAN_CONTROLLER_COUNT (or the config default) so the preflight
 	// can enforce the minimum controller set.
-	if !sanupEnvTruthy("SAN_PUBLIC_DEVNET") {
+	public := opts.publicDevnet || sanupEnvTruthy("SAN_PUBLIC_DEVNET")
+	if !public {
 		overrides["SAN_CONTROLLER_COUNT"] = "0"
+	}
+	if public {
+		overrides["SAN_PUBLIC_DEVNET"] = "1"
+	}
+	if opts.allowInsecure {
+		overrides["SAN_ALLOW_INSECURE_PUBLIC"] = "1"
+	}
+	if strings.TrimSpace(opts.genesisFile) != "" {
+		overrides["SAN_GENESIS_FILE"] = strings.TrimSpace(opts.genesisFile)
 	}
 	// A systemd EnvironmentFile (or a shell export) may select LMDB and a
 	// persistent database path; only fall back to the devnet memory defaults
-	// when the operator did not choose one.
-	if _, set := os.LookupEnv("SAN_DB_BACKEND"); !set {
+	// when the operator did not choose one. Public-devnet mode never selects
+	// the ephemeral backend: the node preflight rejects it instead.
+	if _, set := os.LookupEnv("SAN_DB_BACKEND"); !set && !public {
 		overrides["SAN_DB_BACKEND"] = "memory"
 	}
 	if _, set := os.LookupEnv("SAN_DB_PATH"); !set {
@@ -379,11 +415,18 @@ func buildChildEnv(opts options, dataDir, keyFile, publicKey string, rewardAddre
 		overrides["SAN_BOOTSTRAP"] = strings.Join(bootstrapAddresses, ",")
 	}
 	if seed {
-		overrides["SAN_GENESIS_ALLOCATION"] = publicKey + ":" + opts.genesisAmount
-		overrides["SAN_BLOCK_REWARD"] = "2"
-		overrides["SAN_MIN_BLOCK_INTERVAL_MS"] = "1000"
-		overrides["SAN_UNBONDING_PERIOD"] = "0"
-		overrides["SAN_MIN_VALIDATOR_STAKE"] = "0"
+		if strings.TrimSpace(opts.genesisFile) != "" {
+			// The canonical genesis file is authoritative; no dynamic premine.
+			for name, value := range genesisEnv {
+				overrides[name] = value
+			}
+		} else {
+			overrides["SAN_GENESIS_ALLOCATION"] = publicKey + ":" + opts.genesisAmount
+			overrides["SAN_BLOCK_REWARD"] = "2"
+			overrides["SAN_MIN_BLOCK_INTERVAL_MS"] = "1000"
+			overrides["SAN_UNBONDING_PERIOD"] = "0"
+			overrides["SAN_MIN_VALIDATOR_STAKE"] = "0"
+		}
 	} else {
 		for name, value := range genesisEnv {
 			overrides[name] = value

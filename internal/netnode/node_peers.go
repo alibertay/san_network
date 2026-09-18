@@ -34,6 +34,7 @@ func (n *Node) SelfPeerRecord() map[string]any {
 	}
 	record := map[string]any{
 		"chain_id":        n.chainID,
+		"genesis":         n.genesisFingerprint,
 		"host":            host,
 		"api_port":        int64(n.config.APIPort),
 		"p2p_port":        int64(n.config.P2PPort),
@@ -53,10 +54,21 @@ func (n *Node) SelfPeerRecord() map[string]any {
 	return record
 }
 
-// VerifyPeerRecord validates the chain binding, freshness and signature.
+// VerifyPeerRecord validates the chain and genesis binding, freshness and
+// signature.
 func (n *Node) VerifyPeerRecord(record map[string]any) bool {
 	if chainID, _ := record["chain_id"].(string); chainID != n.chainID {
 		log.Printf("Rejected peer record for chain %v", record["chain_id"])
+		return false
+	}
+	peerGenesis, _ := record["genesis"].(string)
+	if peerGenesis != "" {
+		if !genesisFingerprintsEqual(peerGenesis, n.genesisFingerprint) {
+			log.Printf("Rejected peer record from a different genesis (%s)", peerGenesis)
+			return false
+		}
+	} else if !n.config.AllowLegacyHandshake {
+		log.Printf("Rejected peer record without a genesis fingerprint (pre-Batch-E node)")
 		return false
 	}
 	publicKey, _ := record["public_key"].(string)
@@ -786,6 +798,9 @@ func (n *Node) acceptHandshake(ctx context.Context, stream *PeerStream) bool {
 		stream.Close()
 		return false
 	}
+	if protocol, ok := int64Strict(data["protocol"]); ok && protocol == LegacyProtocolVersion {
+		n.NoteLegacyHandshake()
+	}
 	publicKey, _ := data["public_key"].(string)
 	if n.peerKeyBanned(publicKey) {
 		log.Printf("Rejected connection: peer %s is banned", publicKey)
@@ -959,6 +974,7 @@ func (n *Node) PeerStatus() map[string]any {
 	return map[string]any{
 		"version":            int64(ledger.SchemaVersion),
 		"chain_id":           n.chainID,
+		"genesis":            n.genesisFingerprint,
 		"genesis_allocation": n.genesisAllocationFingerprint(),
 		"height":             tip.Index,
 		"finalized_height":   n.finalizedHeight,

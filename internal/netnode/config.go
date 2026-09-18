@@ -125,6 +125,13 @@ type NodeConfig struct {
 	FaucetAmount   int64
 	FaucetMax      int64
 	FaucetCooldown float64 // seconds per address and per IP
+
+	// Genesis binding and protocol compatibility (Batch E).
+	GenesisFile          string   // SAN_GENESIS_FILE: canonical genesis file
+	GenesisFingerprint   string   // SAN_GENESIS_FINGERPRINT: expected full fingerprint
+	GenesisValidators    []string // SAN_GENESIS_VALIDATORS: bootstrap validator keys
+	AllowLegacyHandshake bool     // SAN_ALLOW_LEGACY_HANDSHAKE: speak/accept v2
+	AllowInsecurePublic  bool     // SAN_ALLOW_INSECURE_PUBLIC: downgrade public preflight errors
 }
 
 // DefaultNodeConfig returns the Python dataclass defaults.
@@ -361,6 +368,11 @@ func NodeConfigFromEnv() NodeConfig {
 	config.MaxOutboundPerSubnet = int(envInt("SAN_OUTBOUND_PER_SUBNET", DefaultMaxOutboundPerSubnet))
 	config.PeerBanSeconds = envFloat("SAN_PEER_BAN_SECONDS", DefaultPeerBanSeconds)
 	config.PeerBanMaxSeconds = envFloat("SAN_PEER_BAN_MAX_SECONDS", DefaultPeerBanMaxSeconds)
+	config.GenesisFile = envStringValue("SAN_GENESIS_FILE")
+	config.GenesisFingerprint = envStringValue("SAN_GENESIS_FINGERPRINT")
+	config.GenesisValidators = splitList(envStringValue("SAN_GENESIS_VALIDATORS"))
+	config.AllowLegacyHandshake = envBool("SAN_ALLOW_LEGACY_HANDSHAKE", false)
+	config.AllowInsecurePublic = envBool("SAN_ALLOW_INSECURE_PUBLIC", false)
 	return config
 }
 
@@ -377,29 +389,113 @@ func (config NodeConfig) effectiveControllerMinCount() int {
 }
 
 // Validate applies the public-devnet preflight: a controller quota that can
-// never be met or a node with no way to learn peers is a startup error, so an
-// operator finds out immediately instead of running a public node with an
-// empty controller set.
+// never be met, a node with no way to learn peers, an ephemeral database, an
+// unauthenticated public API, an open faucet, a missing genesis fingerprint or
+// a legacy handshake mode are startup errors, so an operator finds out
+// immediately instead of running an insecure public node. Setting
+// SAN_ALLOW_INSECURE_PUBLIC=1 downgrades these failures to loud warnings for
+// deliberate test deployments; a genesis fingerprint mismatch is never
+// downgraded.
 func (config NodeConfig) Validate() error {
 	if !config.PublicDevnet {
 		return nil
 	}
+	check := func(err error) error {
+		if err == nil {
+			return nil
+		}
+		if config.AllowInsecurePublic {
+			log.Printf("WARNING: public devnet safety check overridden by SAN_ALLOW_INSECURE_PUBLIC: %v", err)
+			return nil
+		}
+		return err
+	}
+
 	minimum := config.effectiveControllerMinCount()
 	if config.ControllerCount < minimum {
-		return fmt.Errorf(
+		if err := check(fmt.Errorf(
 			"public devnet mode requires SAN_CONTROLLER_COUNT >= %d (configured %d); "+
 				"set SAN_CONTROLLER_MIN_COUNT to lower the floor deliberately",
-			minimum, config.ControllerCount)
+			minimum, config.ControllerCount)); err != nil {
+			return err
+		}
 	}
 	if !config.WideAreaConfigured() && !config.DiscoveryEnabled && !config.peerCacheExists() {
-		return fmt.Errorf(
+		if err := check(fmt.Errorf(
 			"public devnet mode requires a peer source: set SAN_DNS_SEEDS, SAN_BOOTSTRAP, " +
-				"SAN_DISCOVERY=1 or a persisted peer cache")
+				"SAN_DISCOVERY=1 or a persisted peer cache")); err != nil {
+			return err
+		}
 	}
 	if config.MaxInboundPerIP <= 0 || config.MaxPeersPerSubnet <= 0 {
-		return fmt.Errorf("public devnet mode requires positive inbound/subnet peer caps")
+		if err := check(fmt.Errorf("public devnet mode requires positive inbound/subnet peer caps")); err != nil {
+			return err
+		}
+	}
+	if strings.TrimSpace(config.GenesisFingerprint) == "" {
+		if err := check(fmt.Errorf(
+			"public devnet mode requires a pinned genesis fingerprint: load a canonical " +
+				"genesis file (SAN_GENESIS_FILE/--genesis-file) or set SAN_GENESIS_FINGERPRINT")); err != nil {
+			return err
+		}
+	}
+	if !config.persistentStoreConfigured() {
+		if err := check(fmt.Errorf(
+			"public devnet mode requires persistent storage: set SAN_DB_BACKEND=lmdb " +
+				"(or another persistent backend) and a SAN_DB_PATH; the memory backend loses the chain on restart")); err != nil {
+			return err
+		}
+	}
+	if strings.TrimSpace(config.APIToken) == "" && !config.apiHostIsLoopback() {
+		if err := check(fmt.Errorf(
+			"public devnet mode requires API authentication: set SAN_API_TOKEN " +
+				"(or bind the REST API to a loopback address behind a reverse proxy)")); err != nil {
+			return err
+		}
+	}
+	if config.FaucetEnabled && strings.TrimSpace(config.APIToken) == "" {
+		if err := check(fmt.Errorf(
+			"public devnet mode refuses an unauthenticated faucet: enable SAN_API_TOKEN " +
+				"or leave SAN_FAUCET off")); err != nil {
+			return err
+		}
+	}
+	if config.AllowLegacyHandshake {
+		if err := check(fmt.Errorf(
+			"public devnet mode refuses SAN_ALLOW_LEGACY_HANDSHAKE: legacy protocol-2 peers " +
+				"do not carry the genesis fingerprint")); err != nil {
+			return err
+		}
 	}
 	return nil
+}
+
+// persistentStoreConfigured reports whether a durable key-value backend and
+// path are configured (the memory backend and an unset path are ephemeral).
+func (config NodeConfig) persistentStoreConfigured() bool {
+	if !strings.EqualFold(strings.TrimSpace(config.DBBackend), "lmdb") {
+		return false
+	}
+	if config.DBPath == nil {
+		return false
+	}
+	path := strings.TrimSpace(*config.DBPath)
+	return path != "" && path != ":memory:"
+}
+
+// apiHostIsLoopback reports whether the REST API is bound to a loopback
+// interface (empty APIHost falls back to the P2P bind host).
+func (config NodeConfig) apiHostIsLoopback() bool {
+	host := strings.TrimSpace(config.APIHost)
+	if host == "" {
+		host = strings.TrimSpace(config.Host)
+	}
+	host = strings.Trim(host, "[]")
+	switch host {
+	case "127.0.0.1", "localhost", "::1":
+		return true
+	}
+	return strings.HasPrefix(host, "127.")
 }
 
 // peerCacheExists reports whether a persisted address book is available as a

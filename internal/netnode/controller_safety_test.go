@@ -3,26 +3,44 @@ package netnode
 import (
 	"bytes"
 	"context"
+	"fmt"
 	"log"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/alibertay/san_network/internal/ledger/store"
 )
 
 // publicDevnetConfig returns a valid public-devnet configuration: a peer
-// source is present so the preflight accepts it.
+// source, a persistent database and the pinned genesis fingerprint the
+// profile requires.
 func publicDevnetConfig() NodeConfig {
 	config := testConfig()
 	config.PublicDevnet = true
 	config.ControllerCount = 4
 	config.BootstrapPeers = []string{"127.0.0.1:1"}
+	config.APIHost = "127.0.0.1"
+	config.DBBackend = "lmdb"
+	dbPath := filepath.Join(os.TempDir(), fmt.Sprintf("san-public-%d.db", os.Getpid()))
+	config.DBPath = &dbPath
+	config.GenesisFingerprint, _ = GenesisFingerprintFromConfig(config)
 	return config
+}
+
+// newPublicDevnetNode builds public-devnet nodes on an in-memory store so the
+// profile tests do not need the cgo LMDB backend.
+func newPublicDevnetNode(t *testing.T, config NodeConfig) (*Node, error) {
+	t.Helper()
+	return NewNodeWithStore(config, mustIdentity(t), store.NewMemoryStore(":memory:"))
 }
 
 func TestPublicDevnetPreflightFailsFast(t *testing.T) {
 	t.Run("controller target below the floor", func(t *testing.T) {
 		config := publicDevnetConfig()
 		config.ControllerCount = 2
-		if _, err := NewNode(config, mustIdentity(t)); err == nil {
+		if _, err := newPublicDevnetNode(t, config); err == nil {
 			t.Fatalf("node started with a controller target below the public-devnet floor")
 		} else if !strings.Contains(err.Error(), "SAN_CONTROLLER_COUNT") {
 			t.Fatalf("preflight error is not actionable: %v", err)
@@ -33,7 +51,7 @@ func TestPublicDevnetPreflightFailsFast(t *testing.T) {
 		config := publicDevnetConfig()
 		config.ControllerCount = 1
 		config.ControllerMinCount = 1
-		node, err := NewNode(config, mustIdentity(t))
+		node, err := newPublicDevnetNode(t, config)
 		if err != nil {
 			t.Fatalf("explicit SAN_CONTROLLER_MIN_COUNT was ignored: %v", err)
 		}
@@ -48,7 +66,7 @@ func TestPublicDevnetPreflightFailsFast(t *testing.T) {
 		config.Bootstrap = nil
 		config.DNSSeeds = nil
 		config.DiscoveryEnabled = false
-		if _, err := NewNode(config, mustIdentity(t)); err == nil {
+		if _, err := newPublicDevnetNode(t, config); err == nil {
 			t.Fatalf("node started without any way to discover peers")
 		} else if !strings.Contains(err.Error(), "peer source") {
 			t.Fatalf("preflight error is not actionable: %v", err)
@@ -67,7 +85,7 @@ func TestPublicDevnetPreflightFailsFast(t *testing.T) {
 func TestControllerMetricsTargetVsEffective(t *testing.T) {
 	config := publicDevnetConfig()
 	config.ControllerCount = 7
-	node, err := NewNode(config, mustIdentity(t))
+	node, err := newPublicDevnetNode(t, config)
 	if err != nil {
 		t.Fatalf("NewNode: %v", err)
 	}
@@ -86,7 +104,7 @@ func TestControllerMetricsTargetVsEffective(t *testing.T) {
 func TestPublicDevnetEmitsEmptyControllerWarning(t *testing.T) {
 	config := publicDevnetConfig()
 	config.PeerCheckInterval = 3600
-	node, err := NewNode(config, mustIdentity(t))
+	node, err := newPublicDevnetNode(t, config)
 	if err != nil {
 		t.Fatalf("NewNode: %v", err)
 	}

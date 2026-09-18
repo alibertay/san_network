@@ -145,11 +145,12 @@ func (s *Server) handleGenesis(w http.ResponseWriter, r *http.Request) {
 		parameters[name] = strconv.FormatInt(value, 10)
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
-		"chain_id":           node.ChainID(),
-		"schema_version":     ledger.SchemaVersion,
-		"genesis_hash":       node.GenesisHash(),
-		"genesis_allocation": allocations,
-		"parameters":         parameters,
+		"chain_id":            node.ChainID(),
+		"schema_version":      ledger.SchemaVersion,
+		"genesis_hash":        node.GenesisHash(),
+		"genesis_fingerprint": node.GenesisFingerprint(),
+		"genesis_allocation":  allocations,
+		"parameters":          parameters,
 	})
 }
 

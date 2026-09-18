@@ -275,6 +275,14 @@ else
     log "$ENV_FILE already exists; left unchanged"
 fi
 
+# The canonical genesis is installed next to the environment file so public
+# nodes can pin it with SAN_GENESIS_FILE. It is a reference document here:
+# the operator freezes/edits one file per network and distributes it.
+if [ -f "$SCRIPT_DIR/genesis.json" ]; then
+    install -m 0644 "$SCRIPT_DIR/genesis.json" "$CONFIG_DIR/genesis.json"
+    log "installed $CONFIG_DIR/genesis.json (enable it with SAN_GENESIS_FILE=...)"
+fi
+
 if [ "$WITH_CERT" = "1" ] && [ -f "$CERTS_DIR/node.crt" ]; then
     if ! grep -q '^SAN_TLS_CERT=' "$ENV_FILE" 2>/dev/null; then
         printf '\nSAN_TLS_CERT=%s/node.crt\nSAN_TLS_KEY=%s/node.key\nSAN_TLS_CA=%s/ca.crt\n' \

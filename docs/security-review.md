@@ -10,6 +10,13 @@ The Python tree is the frozen reference and was not modified.
 untrusted input path, consensus fallback, resource bound and crypto call
 site. Critical/High findings were fixed with regression tests.
 
+**Nature of this review:** internal, automated/adversarial code review. It is
+**not** an independent external security audit; no third-party audit has been
+commissioned (tracked in `docs/DEVNET_CHECKLIST.md` known limitations and
+release gates). The pre-Go model-assisted review lives in
+[`SECURITY_AUDIT.md`](../SECURITY_AUDIT.md); the "independent external
+security audit" term is reserved for a future real audit.
+
 **Date:** 2026 (pre-devnet final pass).
 
 ---
@@ -76,11 +83,11 @@ this pass, `[documented]` means reviewed and accepted for a first devnet.
 | Orphans | `MaxOrphans` bound with oldest-eviction; `bestOrphanChain` has loop protection; connection only to the current tip. | `node_fork.go` |
 | Controller quorum | 0 controllers -> local accept; otherwise >= 66 % of the selected set, each vote verified for chain id, block hash, advertised key and ML-DSA signature. | `node_sync.go` |
 | Finality | Stake frozen at commit (`finalitySets`), 2/3 threshold, equivocation evidence bounded (256), votes bounded by lookahead and per-hash voter caps. | `node_consensus.go` |
-| Sync | Page cap 512 server-side, `SyncMaxBlocks` total, schema/chain/genesis-allocation checks, every block fully verified and committed one by one; state snapshots from peers are never adopted. | `node_sync.go`, `node.go` |
+| Sync | Page cap 512 server-side, `SyncMaxBlocks` total, schema/chain/full-genesis checks, every block fully verified and committed one by one; state snapshots from peers are never adopted. | `node_sync.go`, `node.go` |
 | Auto-discovery | Registry TTL freshness, lock file with stale-lock recovery, atomic rename, self-exclusion (`isSelf`/`pruneSelfPeers`), bounded port-range probing, throttled background sync (single in-flight). | `discovery.go`, `node_peers.go` |
 | Peer limits | `MaxPeers` enforced, PEERS replies truncated to `2*MaxPeers` and verified record-by-record; message rate window per session; session/sync semaphores (256/8); queues 256. | `node_peers.go`, `transport.go` |
 | Crypto | ML-DSA-44 (CIRCL) verify-before-trust for peer records, HELLO, votes, blocks and transactions; every signed payload goes through `internal/canonical` (no `encoding/json` on signed bytes); `KeysMatch` on load. | `crypto.go`, `identity.go`, `node_peers.go`, `node_consensus.go`, `ledger/*` |
-| Replay protection | Chain id in blocks/txs/votes/HELLO, per-account nonces, tx id = hash of the signed payload; persisted chain verifies the genesis allocation fingerprint. | `transaction.go`, `node.go`, `node_state.go` |
+| Replay protection | Chain id in blocks/txs/votes/HELLO, per-account nonces, tx id = hash of the signed payload; persisted chain verifies the full genesis fingerprint (and the allocation fingerprint for pre-Batch-E databases). | `transaction.go`, `node.go`, `node_state.go` |
 | Process/CLI | `sanup` spawns the staged child with no arguments (no argument injection), detached; `--stop` checks the process image (F5); `--wallet` must match the key-file address; data/key paths come from the operator CLI, not remote input. | `cmd/sanup/*` |
 
 ---

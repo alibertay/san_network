@@ -31,7 +31,9 @@ func TestMaintainOutboundUsesStubDialerAndBackoff(t *testing.T) {
 		host := stringValue(record["host"])
 		attempts[host]++
 		if host == "one.example" {
-			node.AddPeer(record)
+			withGenesis := deepCopyStringMap(record)
+			withGenesis["genesis"] = node.genesisFingerprint
+			node.AddPeer(withGenesis)
 			return true
 		}
 		return false

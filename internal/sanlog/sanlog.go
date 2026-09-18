@@ -230,9 +230,9 @@ var redactionRules = []struct {
 	replace string
 }{
 	// JSON-style secret assignments: "private_key": "....".
-	{regexp.MustCompile(`(?i)("(?:private_key|secret_key|api_token|auth_token|token|password|passphrase|mnemonic|seed_phrase|seed)"\s*:\s*")[^"]*(")`), `${1}<redacted>${2}`},
+	{regexp.MustCompile(`(?i)("(?:private_key|secret_key|api_token|auth_token|token|password|passphrase|mnemonic|seed_phrase|seed|tls_key)"\s*:\s*")[^"]*(")`), `${1}<redacted>${2}`},
 	// key=value / key: value secret assignments in human log lines.
-	{regexp.MustCompile(`(?i)((?:api[_-]?token|auth[_-]?token|access[_-]?token|token|password|passphrase|private[_-]?key|secret[_-]?key|secret)\s*[:=]\s*)([^\s,;"'}\]]+)`), `${1}<redacted>`},
+	{regexp.MustCompile(`(?i)((?:api[_-]?token|auth[_-]?token|access[_-]?token|token|password|passphrase|private[_-]?key|secret[_-]?key|tls[_-]?key|secret)\s*[:=]\s*)([^\s,;"'}\]]+)`), `${1}<redacted>`},
 	// Bearer tokens in headers or URLs.
 	{regexp.MustCompile(`(?i)(authorization\s*[:=]\s*bearer\s+)[^\s"']+`), `${1}<redacted>`},
 	{regexp.MustCompile(`(?i)([?&](?:token|api_token|access_token)=)[^&\s]+`), `${1}<redacted>`},

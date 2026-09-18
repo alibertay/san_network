@@ -22,6 +22,7 @@ Contents:
 7. [Faucet](#7-faucet)
 8. [Joiner runbook](#8-joiner-runbook)
 9. [Security notes](#9-security-notes)
+10. [Canonical genesis and the public-devnet profile](#10-canonical-genesis-and-the-public-devnet-profile)
 
 ---
 
@@ -211,6 +212,8 @@ directory, and systemd unit restarts.
 ## 5. Recommended `san.env` for seeds
 
 ```ini
+SAN_PUBLIC_DEVNET=1           # enforce the public safety profile
+SAN_GENESIS_FILE=/etc/san/genesis.json   # canonical genesis (same on every node)
 SAN_SEED=auto                 # first machine founds; others join via seeds
 SAN_DATA_DIR=/var/lib/san
 SAN_HOST=0.0.0.0
@@ -231,7 +234,7 @@ SAN_TLS_CA=/etc/san/certs/ca.crt
 SAN_OUTBOUND_PEERS=8
 SAN_MAX_ADDR_ENTRIES=1024
 SAN_RPC_RATE_LIMIT=120
-# optional public faucet, see section 7
+# optional public faucet, see section 7 (requires SAN_API_TOKEN)
 # SAN_FAUCET=1
 # SAN_FAUCET_AMOUNT=10
 # SAN_FAUCET_MAX=100
@@ -319,6 +322,7 @@ only what you are willing to give away, and watch `san_balance`-style alerts.
        --host 0.0.0.0 --api-host 127.0.0.1 \
        --advertise-host mynode.example.com \
        --seeds seed.example.com \
+       --genesis-file /etc/san/genesis.json \
        --data-dir /var/lib/san \
        --tls-cert /etc/san/certs/node.crt \
        --tls-key /etc/san/certs/node.key \
@@ -326,18 +330,22 @@ only what you are willing to give away, and watch `san_balance`-style alerts.
    ```
 
    Or in `/etc/san/san.env`: `SAN_SEED=false`,
-   `SAN_DNS_SEEDS=seed.example.com`, `SAN_ADVERTISE_HOST=mynode.example.com`.
+   `SAN_DNS_SEEDS=seed.example.com`, `SAN_ADVERTISE_HOST=mynode.example.com`,
+   `SAN_GENESIS_FILE=/etc/san/genesis.json`, `SAN_PUBLIC_DEVNET=1`.
 
 4. **NAT / advertise host**: forward `8765`, `8770` and `8769` TCP on your
    router to this machine, and make `--advertise-host` resolve to your public
    IP. Without a reachable advertised host, peers can still be dialed
    outbound, but inbound peers (and controller votes) will not find you.
 
-5. **Genesis adoption is automatic**: with `SAN_SEED=false` the launcher picks
-   the first reachable seed (`--seeds` → peer cache → local registry),
-   fetches its `/genesis` over the configured scheme, and passes the chain id,
-   allocation and consensus parameters to the node. You do not copy genesis
-   files by hand.
+5. **Genesis adoption is pinned**: with `--genesis-file
+   /etc/san/genesis.json` (or `SAN_GENESIS_FILE`) the launcher loads the
+   canonical genesis, verifies the seed's reported `genesis_fingerprint`
+   matches it, and passes the chain id, allocation and consensus parameters to
+   the node. A seed on another chain is rejected before the node starts; the
+   node repeats the check in HELLO and before every sync. Without the flag
+   (dev-mode only) it falls back to trust-on-first-use: the first reachable
+   seed's `/genesis` is adopted (`--seeds` → peer cache → local registry).
 
 6. **Verify**:
 
@@ -380,8 +388,11 @@ for anything public, and treat plaintext as a short-lived test mode.
   reachable seed's `/genesis`. Over HTTPS with `--tls-ca ca.crt` that response
   is authenticated against the operator's shared CA; over plain HTTP (or
   `https` with verification skipped) a MITM can serve a different allocation,
-  chain id or consensus parameters. Publish the `ca.crt` fingerprint and the
-  genesis/chain id so joiners can cross-check.
+  chain id or consensus parameters. With `--genesis-file` the fetched values
+  must match the pinned fingerprint before adoption, and the node re-checks the
+  fingerprint in HELLO, in peer records and before sync, so a MITM cannot move
+  an already-pinned node to another chain. Publish the `ca.crt` fingerprint and
+  the genesis fingerprint so joiners can cross-check.
 - **`SAN_API_TOKEN`**: required for a public REST port. Tokens are compared in
   constant time; use a long random value, keep it out of shell history
   (`SAN_API_TOKEN` in `san.env`), and put the API behind a reverse proxy if it
@@ -397,4 +408,67 @@ for anything public, and treat plaintext as a short-lived test mode.
   node identities; any holder of a CA-signed certificate can open a peer
   session. Keep the CA machine and `ca.key` offline/limited.
 - The full residual-risk list lives in
-  [docs/security-review.md](security-review.md).
+  [docs/security-review.md](security-review.md); secret handling (key files,
+  CA key isolation, API tokens, rotation) is in [docs/secrets.md](secrets.md).
+
+---
+
+## 10. Canonical genesis and the public-devnet profile
+
+### 10.1 The canonical genesis file
+
+`deploy/genesis.json` (installed to `/etc/san/genesis.json`) is the frozen
+starting point for a network:
+
+```json
+{
+  "format_version": 1,
+  "chain_id": "san-devnet-1",
+  "allocations": {},
+  "parameters": {
+    "block_reward": "2",
+    "min_block_interval_ms": 1000,
+    "proposer_timeout_ms": 6000,
+    "block_gas_limit": 30000000,
+    "unbonding_period": 100,
+    "slash_bps": 5000,
+    "min_validator_stake": "0"
+  },
+  "validators": [],
+  "fingerprint": "18316ae0ba90922e943010858a5de447bc32636453701321b6ab351c72a8ccb8"
+}
+```
+
+* Allocations are address (or public key) → SAN amount. The shipped file has no
+  premine: validators earn block rewards. **Add the operator/founder
+  allocations before freezing** if the network needs a premine.
+* `parameters` must stay identical on every node; a changed parameter changes
+  the fingerprint and makes the node reject the network.
+* `validators` is an optional bootstrap list (addresses or public keys)
+  included in the fingerprint for operator coordination; it does not create
+  on-chain stake.
+* The file declares its own `fingerprint`; loading rejects an edit that was not
+  followed by a regenerated fingerprint (`genesis.Load` → `Parse`).
+* Every node starts with `--genesis-file`/`SAN_GENESIS_FILE`; `sanup --status`
+  and the node's startup log print the chain id, genesis block hash and
+  fingerprint. `GET /genesis` returns `genesis_fingerprint` so operators can
+  compare nodes. The handshake, peer records and sync all compare it
+  (`docs/protocol.md`).
+
+### 10.2 Dev vs public profile
+
+| Concern | Dev/bootstrap (default) | Public devnet (`SAN_PUBLIC_DEVNET=1`) |
+|---------|-------------------------|----------------------------------------|
+| Database | `SAN_DB_BACKEND=memory` fallback | persistent backend + `SAN_DB_PATH` required |
+| Controllers | forced to 0, no quorum | floor `SAN_CONTROLLER_MIN_COUNT` (default 3) or explicit opt-out |
+| API auth | optional | `SAN_API_TOKEN` required unless the API binds loopback |
+| Faucet | opt-in, may run tokenless on a laptop | refused without `SAN_API_TOKEN` |
+| Genesis | dynamic founder premine allowed | pinned fingerprint required (`--genesis-file`/`SAN_GENESIS_FINGERPRINT`) |
+| Peers | local registry/bootstrap optional | DNS seeds/bootstrap/cache required |
+| Handshake | strict protocol 3 (legacy opt-in for tests) | legacy handshake refused |
+| On failure | permissive | startup fails with an actionable error |
+
+`SAN_ALLOW_INSECURE_PUBLIC=1` (or `sanup --allow-insecure-public`) downgrades
+the profile failures to warnings for deliberate test deployments. It does not
+downgrade a genesis fingerprint **mismatch**, and it must never be set on a
+public node.

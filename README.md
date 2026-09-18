@@ -689,6 +689,36 @@ The full step-by-step operator/joiner runbook (shared CA, DNS records, ports,
 systemd, faucet, joiner troubleshooting) lives in
 **[docs/public-devnet.md](docs/public-devnet.md)**.
 
+### Canonical genesis and the public profile
+
+Every public node must pin the same genesis file (chain id, allocations,
+consensus parameters, validator bootstrap and fingerprint):
+
+```bash
+go run ./cmd/sanup --public-devnet \
+    --genesis-file deploy/genesis.json ...      # or SAN_GENESIS_FILE
+```
+
+`--public-devnet` (or `SAN_PUBLIC_DEVNET=1`) enforces the public safety
+profile; startup fails with an actionable error instead of running unsafely.
+`--allow-insecure-public` (`SAN_ALLOW_INSECURE_PUBLIC=1`) downgrades those
+failures to warnings for local tests only.
+
+| Concern | Dev/bootstrap (default) | Public devnet (`--public-devnet`) |
+|---------|-------------------------|-----------------------------------|
+| Database | in-memory fallback | persistent `SAN_DB_PATH` required |
+| Controllers | forced to 0 | floor `SAN_CONTROLLER_MIN_COUNT` (default 3) |
+| API auth | optional | `SAN_API_TOKEN`, or loopback bind |
+| Faucet | may run tokenless | refused without `SAN_API_TOKEN` |
+| Genesis | dynamic founder premine | pinned `--genesis-file`/fingerprint |
+| Peers | local registry fallback | DNS seeds/bootstrap/cache required |
+| Handshake | protocol 3 (legacy opt-in) | protocol 3 only |
+
+The node prints `chain_id`, genesis hash, full fingerprint and software version
+at startup; `sanup --status` shows them too. See
+[docs/protocol.md](docs/protocol.md) for the handshake and
+[docs/secrets.md](docs/secrets.md) for key/token handling.
+
 ### Ports
 
 All TCP; open them in the firewall/security group of every public node:
@@ -715,7 +745,7 @@ sudo nft add rule inet filter input tcp dport 8765-8770 accept
 ### Seed node (new chain)
 
 ```bash
-go run ./cmd/sanup --seed \
+go run ./cmd/sanup --public-devnet --genesis-file deploy/genesis.json --seed \
     --host 0.0.0.0 --api-host 0.0.0.0 \
     --advertise-host seed.example.com \
     --data-dir /var/lib/san/seed
@@ -728,7 +758,7 @@ node only listens on loopback.
 ### Joining node
 
 ```bash
-go run ./cmd/sanup \
+go run ./cmd/sanup --public-devnet --genesis-file deploy/genesis.json \
     --host 0.0.0.0 --api-host 0.0.0.0 \
     --advertise-host node2.example.com \
     --seeds seed.example.com \

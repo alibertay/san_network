@@ -9,17 +9,21 @@ limitations of the current protocol.
 
 | Gate | Where | Behavior |
 | --- | --- | --- |
-| P2P protocol version | `netnode.ProtocolVersion` checked in `Node.VerifyHello` | A peer whose `protocol` field differs is rejected; the existing session is closed. Regression test: `TestByzantineHandshakeRejections`. |
+| P2P protocol version | `netnode.ProtocolVersion` (currently **3**) checked in `Node.VerifyHello` | A peer whose `protocol` field differs is rejected; the existing session is closed. Protocol 2 is accepted only with `SAN_ALLOW_LEGACY_HANDSHAKE=1`. Regression tests: `TestHelloAcceptRejectMatrix`, `TestLegacyHandshakeWindow`. |
 | Chain id | `VerifyHello` + sync payload | A peer on another chain is rejected. |
-| Genesis allocation fingerprint | `Node.Synchronize` (`genesis_allocation`) | Peers with a different genesis allocation cannot sync; the node refuses. |
+| Full genesis fingerprint | HELLO (`genesis`), peer records, `Status`/`Sync`, persisted store meta | A peer from a different genesis (chain id, allocations, consensus parameters or validator bootstrap) is rejected at handshake, in peer records, before sync and at startup when the database was created from another genesis. `deploy/genesis.json` carries the published fingerprint. Tests: `internal/netnode/genesis_test.go`, `internal/genesis/genesis_test.go`. |
+| Genesis allocation fingerprint | `Node.Synchronize` (`genesis_allocation`) | Legacy fallback for protocol-2 peers; strict peers match the full fingerprint first. |
 | DB schema version | `ledger.SchemaVersion` + store metadata | A newer schema refuses to load (tested against a newer fixture). |
-| Software version in handshake | **not implemented** | `HelloPayload` does not carry the semantic software version or the genesis hash; compatibility is currently enforced by protocol version + chain id + genesis fingerprint. Adding `software_version` / `genesis_hash` to HELLO is a Batch E requirement and needs a protocol version bump. Regression stub: `TestReadyStateLifecycle` (version metadata exposed via REST) plus this document's checklist item. |
-| REST API | additive only | New endpoints/fields are added; existing shapes are preserved. `/ready` is new, `/health` only gained fields. |
+| Software version in handshake | HELLO `software` + REST `/health.version_info` | Carried by every protocol-3 peer (informational: it is logged, not equality-checked, so compatible versions roll). Capability: `software-version-v1`. |
+| REST API | additive only | New endpoints/fields are added; existing shapes are preserved. `/ready` is new, `/health` only gained fields, `/genesis` gained `genesis_fingerprint`. |
 
 Because the handshake rejects a different `protocol` value, **do not bump
 `ProtocolVersion` in an upgrade that is meant to roll**. Bump it only for a
 breaking wire change, and then upgrade as a coordinated stop-the-world
-restart.
+restart. Protocol 3 (Batch E) added `genesis`, `software` and `capabilities`
+to HELLO; a version 2 node must switch on `SAN_ALLOW_LEGACY_HANDSHAKE=1` to
+peer with it, which is a deliberate, temporary compatibility window
+(`docs/protocol.md`).
 
 ## 10-node rolling upgrade (X → X+1, compatible)
 

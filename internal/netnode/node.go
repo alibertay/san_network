@@ -11,7 +11,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
-	"math"
 	"net"
 	"net/http"
 	"os"
@@ -27,13 +26,22 @@ import (
 	"github.com/alibertay/san_network/internal/ledger/store"
 	"github.com/alibertay/san_network/internal/sanlog"
 	"github.com/alibertay/san_network/internal/sanvm"
+	"github.com/alibertay/san_network/internal/version"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 )
 
-// P2P protocol version; a handshake with a different version is rejected.
-const ProtocolVersion = 2
+// P2P protocol version; a handshake with a different version is rejected
+// (protocol 2 is accepted only in explicit legacy compatibility mode).
+const (
+	// ProtocolVersion is the current HELLO/HELLO_ACK protocol: chain id, full
+	// genesis fingerprint, software version and capability list (Batch E).
+	ProtocolVersion = 3
+	// LegacyProtocolVersion is the pre-Batch-E handshake (chain id only); it is
+	// accepted only when SAN_ALLOW_LEGACY_HANDSHAKE=1.
+	LegacyProtocolVersion = 2
+)
 
 // Reject blocks dated more than this far into the future / past (live rules).
 const (
@@ -126,6 +134,10 @@ type Node struct {
 	blockchain    *ledger.Blockchain
 	rewardAddress string
 
+	// genesisFingerprint is the full genesis fingerprint this node was built
+	// from; handshake, peer records and sync compare it.
+	genesisFingerprint string
+
 	// Finality.
 	finalizedHeight      int64
 	finalizedHash        string
@@ -186,10 +198,29 @@ func NewNodeWithStore(config NodeConfig, identity *ledger.NodeIdentity, kv store
 }
 
 func newNode(config NodeConfig, identity *ledger.NodeIdentity, kv store.KeyValueStore) (*Node, error) {
+	applied, err := config.ApplyGenesisFile()
+	if err != nil {
+		return nil, err
+	}
+	config = applied
 	if err := config.Validate(); err != nil {
 		return nil, err
 	}
 	config.GenesisAllocations = NormalizeGenesisKeys(config.GenesisAllocations)
+
+	computedFingerprint, err := GenesisFingerprintFromConfig(config)
+	if err != nil {
+		return nil, err
+	}
+	if expected := strings.TrimSpace(config.GenesisFingerprint); expected != "" {
+		if !genesisFingerprintsEqual(expected, computedFingerprint) {
+			return nil, fmt.Errorf(
+				"genesis fingerprint mismatch: configured %s but this node's chain id, allocations and "+
+					"consensus parameters hash to %s; refusing to start on a different network",
+				expected, computedFingerprint)
+		}
+	}
+	config.GenesisFingerprint = computedFingerprint
 
 	if identity == nil {
 		keyFile := ""
@@ -232,6 +263,7 @@ func newNode(config NodeConfig, identity *ledger.NodeIdentity, kv store.KeyValue
 		config:               config,
 		identity:             identity,
 		chainID:              config.ChainID,
+		genesisFingerprint:   config.GenesisFingerprint,
 		PEERS:                []map[string]any{},
 		seenPeerUpdates:      map[string]float64{},
 		blockchain:           blockchain,
@@ -292,6 +324,18 @@ func newNode(config NodeConfig, identity *ledger.NodeIdentity, kv store.KeyValue
 			"controller_approvals":    0,
 			"controller_failures":     0,
 			"api_rate_limited":        0,
+			// Batch E handshake rejection reasons (each rejection also
+			// increments handshakes_failed).
+			"handshake_rejected_protocol":   0,
+			"handshake_rejected_chain":      0,
+			"handshake_rejected_genesis":    0,
+			"handshake_rejected_software":   0,
+			"handshake_rejected_capability": 0,
+			"handshake_rejected_stale":      0,
+			"handshake_rejected_signature":  0,
+			"handshake_rejected_malformed":  0,
+			"handshake_rejected_type":       0,
+			"handshakes_legacy_accepted":    0,
 		},
 		lastSeenBlockIndex: blockchain.Tip().Index,
 		chainHashes:        map[string]struct{}{},
@@ -345,6 +389,9 @@ func newNode(config NodeConfig, identity *ledger.NodeIdentity, kv store.KeyValue
 			if err := node.store.SetMeta("genesis_allocation", node.genesisAllocationFingerprint()); err != nil {
 				return nil, err
 			}
+			if err := node.store.SetMeta("genesis_fingerprint", node.genesisFingerprint); err != nil {
+				return nil, err
+			}
 		} else {
 			if err := node.loadPersistedState(node.store); err != nil {
 				return nil, err
@@ -396,6 +443,7 @@ func (n *Node) Start(ctx context.Context) error {
 	n.startedAt = time.Now()
 	peerCount := len(n.PEERS)
 	n.mu.Unlock()
+	n.logGenesis()
 	if peerCount > 0 {
 		n.Synchronize(runCtx)
 		if n.PendingCount() == 0 {
@@ -415,6 +463,25 @@ func (n *Node) Start(ctx context.Context) error {
 		"database", n.store != nil,
 	))
 	return nil
+}
+
+// logGenesis prints the chain identity prominently at startup so an operator
+// can compare the genesis fingerprint and genesis block hash with the
+// published devnet values before the node accepts any peer data.
+func (n *Node) logGenesis() {
+	n.mu.Lock()
+	tip := n.blockchain.Tip()
+	n.mu.Unlock()
+	log.Printf("GENESIS chain_id=%s hash=%s fingerprint=%s software=%s protocol=%d",
+		n.chainID, tip.CurrentBlockHash, n.genesisFingerprint, version.Version, ProtocolVersion)
+	sanlog.Info("genesis verified", sanlog.Fields(
+		"chain_id", n.chainID,
+		"genesis_hash", tip.CurrentBlockHash,
+		"genesis_fingerprint", n.genesisFingerprint,
+		"software_version", n.SoftwareVersion(),
+		"protocol_version", int64(ProtocolVersion),
+		"persistent", n.store != nil,
+	))
 }
 
 // Stop tears down the servers, loops and the store.
@@ -511,14 +578,25 @@ func (n *Node) TransportClientCredentials(peer map[string]any) credentials.Trans
 // Protocol handshake
 // ---------------------------------------------------------------------- #
 
-// HelloPayload builds the signed hello record for a message type.
+// HelloPayload builds the signed hello record for a message type. Protocol 3
+// peers additionally carry the full genesis fingerprint, the software version
+// and the supported capability list; legacy mode emits the protocol-2 record.
 func (n *Node) HelloPayload(messageType string) map[string]any {
 	record := map[string]any{
 		"type":       messageType,
-		"protocol":   int64(ProtocolVersion),
+		"protocol":   n.outgoingProtocolVersion(),
 		"chain_id":   n.chainID,
 		"public_key": n.GetPublicKey(),
 		"timestamp":  nowSeconds(),
+	}
+	if n.outgoingProtocolVersion() == int64(ProtocolVersion) {
+		record["genesis"] = n.genesisFingerprint
+		record["software"] = n.SoftwareVersion()
+		capabilities := make([]any, 0, len(requiredHelloCapabilities))
+		for _, capability := range supportedHelloCapabilities() {
+			capabilities = append(capabilities, capability)
+		}
+		record["capabilities"] = capabilities
 	}
 	if encoded, err := canonical.Marshal(record); err == nil {
 		if signature := n.identity.SignHex(encoded); signature != "" {
@@ -528,53 +606,41 @@ func (n *Node) HelloPayload(messageType string) map[string]any {
 	return record
 }
 
-// VerifyHello validates a HELLO/HELLO_ACK record.
+// VerifyHello validates a HELLO/HELLO_ACK record: type, protocol version
+// (with an explicit legacy window), chain id, full genesis fingerprint,
+// software version, required capabilities, freshness and signature. Every
+// rejection is counted under handshakes_failed plus a reason-specific counter.
 func (n *Node) VerifyHello(data map[string]any) bool {
-	if data == nil {
-		return false
+	reason := n.helloRejectReason(data)
+	if reason == "" {
+		return true
 	}
-	messageType, _ := data["type"].(string)
-	if messageType != "HELLO" && messageType != "HELLO_ACK" {
-		return false
+	n.incMetric("handshakes_failed")
+	n.incMetric("handshake_rejected_" + reason)
+	fields := sanlog.Fields(
+		"error_type", reason,
+		"local_protocol", ProtocolVersion,
+		"chain_id", n.chainID,
+	)
+	switch reason {
+	case "protocol":
+		fields["peer_protocol"] = data["protocol"]
+	case "chain":
+		fields["peer_chain_id"] = data["chain_id"]
+	case "genesis":
+		fields["peer_genesis"] = data["genesis"]
+		fields["genesis"] = n.genesisFingerprint
+	case "signature", "malformed", "stale", "software", "capability", "type":
+		fields["peer"] = data["public_key"]
 	}
-	if int64Value(data["protocol"]) != ProtocolVersion {
-		n.incMetric("handshakes_failed")
-		sanlog.Warn("handshake rejected", sanlog.Fields(
-			"error_type", "protocol",
-			"peer_protocol", data["protocol"],
-			"local_protocol", ProtocolVersion,
-		))
-		return false
-	}
-	if chainID, _ := data["chain_id"].(string); chainID != n.chainID {
-		n.incMetric("handshakes_failed")
-		sanlog.Warn("handshake rejected", sanlog.Fields(
-			"error_type", "chain_id",
-			"peer_chain_id", chainID,
-			"chain_id", n.chainID,
-		))
-		return false
-	}
-	timestamp, ok := numericValue(data["timestamp"])
-	if !ok {
-		return false
-	}
-	if math.Abs(nowSeconds()-timestamp) > HelloTTL {
-		n.incMetric("handshakes_failed")
-		sanlog.Warn("handshake rejected", sanlog.Fields("error_type", "stale_timestamp"))
-		return false
-	}
-	publicKey, _ := data["public_key"].(string)
-	signature, _ := data["signature"].(string)
-	if publicKey == "" || signature == "" {
-		return false
-	}
-	payload := mapWithout(data, helloMetaFields)
-	encoded, err := canonical.Marshal(payload)
-	if err != nil {
-		return false
-	}
-	return ledger.VerifyIdentity(encoded, signature, publicKey)
+	sanlog.Warn("handshake rejected", fields)
+	return false
+}
+
+// NoteLegacyHandshake records a successful protocol-2 handshake so operators
+// can see that compatibility mode is in use.
+func (n *Node) NoteLegacyHandshake() {
+	n.incMetric("handshakes_legacy_accepted")
 }
 
 // ---------------------------------------------------------------------- #

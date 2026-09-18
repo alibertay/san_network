@@ -22,6 +22,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/alibertay/san_network/internal/genesis"
 	"github.com/alibertay/san_network/internal/ledger"
 	"github.com/alibertay/san_network/internal/netnode"
 	"github.com/alibertay/san_network/internal/sanlog"
@@ -67,6 +68,12 @@ options:
   --genesis-amount SAN    founder premine for the wallet (default 10000)
   --host HOST             P2P bind host (default 127.0.0.1; use 0.0.0.0 public)
   --chain-id ID           chain id (default san-devnet-1)
+  --genesis-file FILE     canonical genesis JSON (chain id, allocations,
+                          parameters, fingerprint); SAN_GENESIS_FILE
+  --public-devnet         enforce the public-devnet safety profile
+                          (SAN_PUBLIC_DEVNET=1)
+  --allow-insecure-public downgrade public-profile failures to warnings
+                          (SAN_ALLOW_INSECURE_PUBLIC=1; tests only)
   --timeout SECONDS       seconds to wait for health (default 90)
   --foreground            run the node in this process instead of detaching
                           (for systemd Type=simple; SIGTERM stops it gracefully)
@@ -152,6 +159,10 @@ type options struct {
 	genesisAmount  string
 	host           string
 	chainID        string
+	chainIDSet     bool
+	genesisFile    string
+	publicDevnet   bool
+	allowInsecure  bool
 	timeout        float64
 	foreground     bool
 	json           bool
@@ -210,6 +221,9 @@ func parseOptions(argv []string, stdout, stderr io.Writer) (options, int) {
 		tlsCA:         envDefaultString("SAN_TLS_CA", ""),
 		peerCache:     envDefaultString("SAN_PEERS_CACHE", ""),
 		registryPath:  envDefaultString("SAN_PEER_REGISTRY", ""),
+		genesisFile:   envDefaultString("SAN_GENESIS_FILE", ""),
+		publicDevnet:  sanupEnvTruthy("SAN_PUBLIC_DEVNET"),
+		allowInsecure: sanupEnvTruthy("SAN_ALLOW_INSECURE_PUBLIC"),
 		timeout:       90.0,
 	}
 	opts.stakeProvided = opts.stake != ""
@@ -252,6 +266,9 @@ func parseOptions(argv []string, stdout, stderr io.Writer) (options, int) {
 	flags.StringVar(&opts.genesisAmount, "genesis-amount", opts.genesisAmount, "")
 	flags.StringVar(&opts.host, "host", opts.host, "")
 	flags.StringVar(&opts.chainID, "chain-id", opts.chainID, "")
+	flags.StringVar(&opts.genesisFile, "genesis-file", opts.genesisFile, "")
+	flags.BoolVar(&opts.publicDevnet, "public-devnet", opts.publicDevnet, "")
+	flags.BoolVar(&opts.allowInsecure, "allow-insecure-public", opts.allowInsecure, "")
 	flags.Float64Var(&opts.timeout, "timeout", opts.timeout, "")
 	flags.BoolVar(&opts.foreground, "foreground", false, "")
 	flags.BoolVar(&opts.json, "json", false, "")
@@ -299,6 +316,10 @@ func parseOptions(argv []string, stdout, stderr io.Writer) (options, int) {
 			opts.stakeProvided = true
 			return
 		}
+		if defined.Name == "chain-id" {
+			opts.chainIDSet = true
+			return
+		}
 		if defined.Name == "seed" {
 			opts.seed.explicit = true
 		}
@@ -341,6 +362,25 @@ func envDefaultInt(name string, fallback int) int {
 // runStart is the default action: start (or reuse) the node and reconcile the
 // requested stake.
 func runStart(opts options, stdout, stderr io.Writer) int {
+	if err := validatePublicProfile(opts); err != nil {
+		fmt.Fprintf(stderr, "[sanup] error: %v\n", err)
+		return 2
+	}
+	var spec *genesis.Spec
+	if path := strings.TrimSpace(opts.genesisFile); path != "" {
+		loaded, err := genesis.Load(path)
+		if err != nil {
+			fmt.Fprintf(stderr, "[sanup] error: %v\n", err)
+			return 2
+		}
+		if opts.chainIDSet && loaded.ChainID != opts.chainID {
+			fmt.Fprintf(stderr,
+				"[sanup] error: --chain-id %s conflicts with %s (chain id %s); refusing to mix two networks\n",
+				opts.chainID, path, loaded.ChainID)
+			return 2
+		}
+		spec = loaded
+	}
 	dataDir, keyFile, identity, address, code := resolveIdentity(opts, stdout, stderr, true)
 	if code >= 0 {
 		return code
@@ -424,10 +464,22 @@ func runStart(opts options, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "[sanup] error: %v\n", err)
 		return 1
 	}
-	seed, bootstrap, genesisEnv, err := resolveGenesis(opts, identity.PublicKeyHex())
+	expectedFingerprint := ""
+	if spec != nil {
+		expectedFingerprint = spec.Fingerprint
+	}
+	seed, bootstrap, genesisEnv, err := resolveGenesis(opts, identity.PublicKeyHex(), expectedFingerprint)
 	if err != nil {
 		fmt.Fprintf(stderr, "[sanup] error: %v\n", err)
 		return 1
+	}
+	if spec != nil {
+		fileEnv, envErr := spec.Environment()
+		if envErr != nil {
+			fmt.Fprintf(stderr, "[sanup] error: %v\n", envErr)
+			return 1
+		}
+		genesisEnv = fileEnv
 	}
 
 	logFile := filepath.Join(dataDir, "node.log")
@@ -442,6 +494,14 @@ func runStart(opts options, stdout, stderr io.Writer) int {
 	}
 	logf(stdout, "p2p    : api=%d p2p=%d peer=%d controller=%d", ports.API, ports.P2P, ports.Peer, ports.Controller)
 	logf(stdout, "data   : %s", dataDir)
+	if spec != nil {
+		logf(stdout, "genesis: chain_id=%s fingerprint=%s", spec.ChainID, spec.Fingerprint)
+		if len(spec.Allocations) == 0 {
+			logf(stdout, "genesis: no premine allocations (validators earn block rewards)")
+		}
+	} else if pinned := strings.TrimSpace(os.Getenv("SAN_GENESIS_FINGERPRINT")); pinned != "" {
+		logf(stdout, "genesis: pinned fingerprint %s", pinned)
+	}
 
 	newState := nodeState{
 		Address:        wallet,
@@ -582,6 +642,45 @@ var (
 func configureAPITLS(opts options) {
 	localAPITLS = opts.tlsCert != "" && opts.tlsKey != ""
 	localAPICA = opts.tlsCA
+}
+
+// validatePublicProfile is the launcher-side public-devnet preflight. The node
+// repeats these checks; failing before spawning gives the operator the error
+// without a log tail. SAN_ALLOW_INSECURE_PUBLIC=1 / --allow-insecure-public
+// downgrades them for deliberate test deployments only.
+func validatePublicProfile(opts options) error {
+	public := opts.publicDevnet || sanupEnvTruthy("SAN_PUBLIC_DEVNET")
+	if !public || opts.allowInsecure {
+		return nil
+	}
+	if strings.TrimSpace(opts.genesisFile) == "" && strings.TrimSpace(os.Getenv("SAN_GENESIS_FINGERPRINT")) == "" {
+		return fmt.Errorf(
+			"public-devnet mode requires --genesis-file (or SAN_GENESIS_FILE/SAN_GENESIS_FINGERPRINT) " +
+				"so every node shares one genesis fingerprint")
+	}
+	if strings.EqualFold(strings.TrimSpace(os.Getenv("SAN_DB_BACKEND")), "memory") {
+		return fmt.Errorf("public-devnet mode refuses SAN_DB_BACKEND=memory: the chain must survive restarts")
+	}
+	if !apiHostIsLoopback(opts.apiHost) && strings.TrimSpace(opts.apiToken) == "" {
+		return fmt.Errorf(
+			"public-devnet mode requires --api-token (or SAN_API_TOKEN) when the REST API is not bound "+
+				"to loopback (--api-host %s)", opts.apiHost)
+	}
+	faucet := opts.faucet || sanupEnvTruthy("SAN_FAUCET")
+	if faucet && strings.TrimSpace(opts.apiToken) == "" {
+		return fmt.Errorf("public-devnet mode refuses --faucet without --api-token")
+	}
+	return nil
+}
+
+// apiHostIsLoopback reports whether the configured REST bind host is local.
+func apiHostIsLoopback(host string) bool {
+	host = strings.Trim(strings.TrimSpace(host), "[]")
+	switch host {
+	case "", "127.0.0.1", "localhost", "::1":
+		return true
+	}
+	return strings.HasPrefix(host, "127.")
 }
 
 func apiURL(host string, port int) string {

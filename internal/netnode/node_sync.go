@@ -37,6 +37,7 @@ func (n *Node) GetSyncPayload(fromIndex int64, limit int) map[string]any {
 	payload := map[string]any{
 		"version":            int64(ledger.SchemaVersion),
 		"chain_id":           n.chainID,
+		"genesis":            n.genesisFingerprint,
 		"genesis_allocation": n.genesisAllocationFingerprint(),
 		"blocks":             []any{},
 		"storage":            nil,
@@ -91,6 +92,14 @@ func (n *Node) selectSyncPeer(ctx context.Context) map[string]any {
 			continue
 		}
 		if statusChainID, _ := status["chain_id"].(string); statusChainID != n.chainID {
+			continue
+		}
+		peerGenesis, _ := status["genesis"].(string)
+		if peerGenesis != "" {
+			if !genesisFingerprintsEqual(peerGenesis, n.genesisFingerprint) {
+				continue
+			}
+		} else if !n.config.AllowLegacyHandshake {
 			continue
 		}
 		if peerAllocation, _ := status["genesis_allocation"].(string); peerAllocation != "" &&
@@ -151,6 +160,17 @@ func (n *Node) Synchronize(ctx context.Context) bool {
 			return applied > 0
 		}
 
+		if peerGenesis, _ := payload["genesis"].(string); peerGenesis != "" {
+			if !genesisFingerprintsEqual(peerGenesis, n.genesisFingerprint) {
+				n.incMetric("sync_failures")
+				log.Printf("Sync: peer %s uses a different genesis; refusing to sync", PeerLabel(peer))
+				return false
+			}
+		} else if !n.config.AllowLegacyHandshake {
+			n.incMetric("sync_failures")
+			log.Printf("Sync: peer %s did not report a genesis fingerprint; refusing to sync", PeerLabel(peer))
+			return false
+		}
 		if peerAllocation, _ := payload["genesis_allocation"].(string); peerAllocation != "" &&
 			peerAllocation != n.genesisAllocationFingerprint() {
 			n.incMetric("sync_failures")

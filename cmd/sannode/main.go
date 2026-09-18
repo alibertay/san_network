@@ -43,8 +43,10 @@ options:
   --bootstrap HOST:PORT        seed REST endpoint host:port
   --expect-genesis-hash HASH   pin the expected genesis hash
   --genesis-amount AMOUNT      SAN premined to this node in founder mode
-  --genesis-alloc ALLOC        shared allocation (overrides fetching)
-  --stake AMOUNT               validator deposit in SAN (0 = skip)
+	--genesis-alloc ALLOC        shared allocation (overrides fetching)
+	--genesis-file FILE          canonical genesis JSON (chain id, allocations,
+	                             parameters, fingerprint); SAN_GENESIS_FILE
+	--stake AMOUNT               validator deposit in SAN (0 = skip)
   --block-reward AMOUNT        SAN minted per block (founder only)
   --host HOST                  bind host (default 127.0.0.1)
 `
@@ -94,6 +96,7 @@ func runNode(argv []string, stdout, stderr io.Writer) int {
 	expectGenesisHash := flags.String("expect-genesis-hash", "", "")
 	genesisAmount := flags.String("genesis-amount", "1000000", "")
 	genesisAlloc := flags.String("genesis-alloc", "", "")
+	genesisFile := flags.String("genesis-file", "", "")
 	stake := flags.Float64("stake", 1000.0, "")
 	blockReward := flags.Float64("block-reward", 2.0, "")
 	host := flags.String("host", "127.0.0.1", "")
@@ -173,7 +176,11 @@ func runNode(argv []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stdout, "[run_node] founder mode: premine %s SAN to the node identity\n", *genesisAmount)
 	}
 
-	envDefault("SAN_CHAIN_ID", *chainID)
+	// A canonical genesis file is authoritative for the chain id; do not let
+	// the flag default shadow it (ApplyGenesisFile would reject the conflict).
+	if strings.TrimSpace(*genesisFile) == "" {
+		envDefault("SAN_CHAIN_ID", *chainID)
+	}
 	envDefault("SAN_HOST", *host)
 	envDefault("SAN_ADVERTISE_HOST", *host)
 	envDefault("SAN_API_PORT", strconv.Itoa(apiPort))
@@ -182,6 +189,7 @@ func runNode(argv []string, stdout, stderr io.Writer) int {
 	envDefault("SAN_CONTROLLER_PORT", strconv.Itoa(apiPort+720))
 	envDefault("SAN_DB_PATH", dbPath)
 	envDefault("SAN_KEY_FILE", *key)
+	envDefault("SAN_GENESIS_FILE", *genesisFile)
 	envDefault("SAN_GENESIS_ALLOCATION", allocation)
 	envDefault("SAN_REWARD_ADDRESS", normalizedAddress)
 	envDefault("SAN_BLOCK_THRESHOLD_FEE", "0.0001")
@@ -230,6 +238,7 @@ func runNode(argv []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "[run_node] cannot start the node: %v\n", err)
 		return 1
 	}
+	logGenesisBanner(stdout, node)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := node.Start(ctx); err != nil {
@@ -261,6 +270,7 @@ func runServe(argv []string, stdout, stderr io.Writer) int {
 		fmt.Fprintf(stderr, "cannot start the node: %v\n", err)
 		return 1
 	}
+	logGenesisBanner(stdout, node)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	if err := node.Start(ctx); err != nil {
@@ -273,6 +283,20 @@ func runServe(argv []string, stdout, stderr io.Writer) int {
 		return 1
 	}
 	return 0
+}
+
+// logGenesisBanner prints the chain identity before the node accepts any
+// remote data, so an operator can compare it with the published devnet
+// genesis values (chain id, block hash, full fingerprint).
+func logGenesisBanner(stdout io.Writer, node *netnode.Node) {
+	fmt.Fprintf(stdout,
+		"[run_node] genesis\n"+
+			"  chain id       : %s\n"+
+			"  genesis hash   : %v\n"+
+			"  fingerprint    : %s\n"+
+			"  software       : %s (protocol %d)\n",
+		node.ChainID(), node.GenesisHash(), node.GenesisFingerprint(),
+		node.SoftwareVersion(), netnode.ProtocolVersion)
 }
 
 // ---------------------------------------------------------------------- #

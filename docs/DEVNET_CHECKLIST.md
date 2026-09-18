@@ -44,11 +44,20 @@ must be resolved before announcing the devnet.
 ## Configuration and secrets
 
 - [x] Key files written with 0600 and data dirs with 0700 on Linux
-- [x] Private keys and API tokens never logged
-- [ ] Public-devnet config profile (`deploy/san.env.example`) reviewed and frozen
-- [ ] Production nodes refuse development defaults (no in-memory DB, no open faucet)
+  (`TestSecretFileAndDirectoryPermissions`)
+- [x] Private keys, API tokens and TLS keys never logged (redaction covers PEM,
+  bearer/query tokens, environment-style assignments and JSON fields:
+  `TestRedactionCoversCredentials`, `TestRedactionCoversEnvironmentAndTLSSecrets`,
+  `TestJSONHandlerRedactsFields`); the process environment is never dumped
+- [x] Public-devnet config profile (`deploy/san.env.example`) reviewed and
+  frozen; public mode refuses memory storage, tokenless API/faucet, zero
+  controllers, missing genesis fingerprint and legacy handshakes
+  (`TestPublicDevnetProfileValidationMatrix`, `TestValidatePublicProfileMatrix`)
+- [x] Production nodes refuse development defaults (no in-memory DB, no open
+  faucet, no unauthenticated non-loopback API)
 - [x] Controller count and minimum stake validated at startup with clear warnings
-- [ ] API token required (or reverse proxy enforced) for public REST exposure
+- [x] API token required (or loopback bind enforced) for public REST exposure
+- [x] Secret-handling runbook for VPS operators (`docs/secrets.md`)
 
 ## Observability and operations
 
@@ -65,14 +74,23 @@ must be resolved before announcing the devnet.
 
 ## Genesis and protocol
 
-- [x] Genesis fingerprint checked across peers before sync
-- [ ] Genesis file frozen and published for operators
-- [ ] Handshake carries chain id, genesis hash, protocol and software version
-  (chain id and protocol are carried and enforced; genesis hash and software
-  version are not yet in HELLO — Batch E item, see `docs/rolling-upgrade.md`)
-- [x] Incompatible protocol versions are rejected with a useful reason
+- [x] Full genesis fingerprint checked before startup, in HELLO, in peer
+  records and before sync (legacy `genesis_allocation` remains the protocol-2
+  fallback)
+- [x] Genesis file frozen and published for operators (`deploy/genesis.json`,
+  `--genesis-file`/`SAN_GENESIS_FILE`, installed to `/etc/san/genesis.json`;
+  round-trip, mismatch and invalid-file tests in `internal/genesis`,
+  `TestDeployGenesisFileLoads`)
+- [x] Handshake carries chain id, genesis fingerprint, protocol and software
+  version, and capabilities (`docs/protocol.md`; protocol bumped to 3 with an
+  explicit `SAN_ALLOW_LEGACY_HANDSHAKE=1` window for the frozen Python
+  reference; tests `TestHelloAcceptRejectMatrix`, `TestLegacyHandshakeWindow`)
+- [x] Incompatible protocol/genesis/chain/capability peers are rejected with a
+  useful reason and per-reason metrics (`handshake_rejected_*`)
 - [x] Version endpoint exposes protocol and schema versions
 - [x] Upgrade strategy documented (rolling vs coordinated, `docs/rolling-upgrade.md`)
+- [x] Genesis hash and fingerprint printed prominently at node startup and in
+  `sanup --status` (`TestStartupLogsGenesis`)
 
 ## Deployment
 
@@ -176,7 +194,11 @@ until the corresponding work lands.
   a network-level attacker could serve a different genesis to a joining node.
 - **Mixed-implementation policy.** Python remains the reference and fixture
   source; the Go node is the canonical protocol implementation
-  (`docs/interop.md`). The opt-in harness
+  (`docs/interop.md`). Go protocol 3 carries the full genesis fingerprint,
+  software version and capabilities; the frozen Python reference still speaks
+  protocol 2, so live Go/Python peering runs the Go side with
+  `SAN_ALLOW_LEGACY_HANDSHAKE=1` (a trusted-network compatibility window, not
+  for public nodes). The opt-in harness
   (`go test -tags interop ./internal/netnode -run TestInterop`, skipped
   cleanly without Python) verifies Go-vs-Go and live Go/Python genesis
   agreement, handshake, transfer/block propagation, stake deposit, sync
@@ -219,10 +241,11 @@ until the corresponding work lands.
   and `SAN_LOG_LEVEL` configure text/JSON output; `internal/sanlog` redacts
   private keys, tokens, bearer headers and PEM blocks (tests:
   `TestTextFormatKeepsMessageAndFields`, `TestJSONFormatEmitsStructuredRecord`,
-  `TestLevelFiltering`, `TestRedactionCoversCredentials`). Legacy
-  `log.Printf` call sites still produce plain messages, and the handshake does
-  not carry the software version, so version-tagged structured logs are
-  incomplete until Batch E.
+  `TestLevelFiltering`, `TestRedactionCoversCredentials`,
+  `TestRedactionCoversEnvironmentAndTLSSecrets`). Legacy `log.Printf` call
+  sites still produce plain messages. The handshake now carries the software
+  version (`software-version-v1`) and startup logs it next to the genesis
+  fingerprint, so version-tagged records are available from Batch E onward.
 - **Readiness semantics are devnet-grade.** `/ready` returns 503 until the
   node has listeners, identity, genesis and peers; in `SAN_PUBLIC_DEVNET` mode
   it turns `degraded` when no peers are visible or the controller target is
@@ -230,10 +253,23 @@ until the corresponding work lands.
   `TestReadyStateDegradedWithoutPeers`, `TestReadyEndpointReportsStarting`.
   It does not yet detect disk-full, clock skew or a stuck-but-reachable chain.
 - **Rolling upgrade is documented but unexercised on a multi-host devnet.**
-  The handshake protocol-version gate exists and is tested
-  (`TestByzantineHandshakeRejections`); `docs/rolling-upgrade.md` covers the
-  10-node one-at-a-time procedure and rollback. `deploy/deploy_test.go` lints
+  The protocol-version gate exists and is tested (`TestHelloAcceptRejectMatrix`,
+  `TestLegacyHandshakeWindow`); `docs/rolling-upgrade.md` covers the 10-node
+  one-at-a-time procedure and the coordinated protocol-3 window. The legacy
+  compatibility mode (`SAN_ALLOW_LEGACY_HANDSHAKE=1`) accepts protocol-2 peers
+  without the genesis/software/capability checks and is refused by the
+  public-devnet profile; it exists for the Python interop harness and
+  one-time migrations on trusted networks only. `deploy/deploy_test.go` lints
   the systemd unit, Dockerfile and installer, but no automated multi-host
   upgrade run exists yet.
+- **The published genesis file has no premine.** `deploy/genesis.json` ships
+  with an empty allocation map (validators earn block rewards); an operator
+  who wants a premine must add the allocations and regenerate the fingerprint
+  *before* freezing and distributing the file. Loading rejects a hand-edited
+  file whose declared fingerprint no longer matches.
+- **Public-profile override is a footgun by design.**
+  `SAN_ALLOW_INSECURE_PUBLIC=1` / `sanup --allow-insecure-public` downgrades
+  every public-devnet safety failure to a warning for local testing; startup
+  logs a `WARNING` for each one, and it must never be set on a public node.
 
 Not mainnet ready. Public devnet only.

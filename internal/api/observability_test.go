@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/alibertay/san_network/internal/api"
+	"github.com/alibertay/san_network/internal/netnode"
 )
 
 // TestReadyEndpointReportsStarting covers the lifecycle state before the node
@@ -63,7 +64,7 @@ func TestHealthExposesVersionInfo(t *testing.T) {
 			t.Errorf("version_info.%s missing", key)
 		}
 	}
-	if info["protocol_version"].(float64) != 2 {
+	if info["protocol_version"].(float64) != float64(netnode.ProtocolVersion) {
 		t.Errorf("protocol_version = %v", info["protocol_version"])
 	}
 }

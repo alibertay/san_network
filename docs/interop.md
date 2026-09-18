@@ -29,7 +29,12 @@ The Python-side tests skip cleanly when no `python`/`python3` with
 (`SAN_HOST=127.0.0.1`, ephemeral ports, `SAN_ADVERTISE_HOST=127.0.0.1`,
 in-memory DB, TLS off) and killed when the test ends.
 
-Python files are never modified by the harness.
+The harness builds its Go nodes with `AllowLegacyHandshake = true`
+(`interopConfig`): the frozen Python reference speaks protocol 2, while Go
+protocol 3 requires the full genesis fingerprint, software version and
+capability list in HELLO. `SAN_ALLOW_LEGACY_HANDSHAKE=1` is the documented,
+explicit compatibility window (`docs/protocol.md`) and is refused by the
+public-devnet profile. Python files are never modified by the harness.
 
 ## Verified matrix
 
