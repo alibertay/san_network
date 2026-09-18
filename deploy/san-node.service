@@ -3,6 +3,9 @@ Description=SAN Network devnet node (sanup)
 Documentation=https://github.com/alibertay/san_network
 After=network-online.target
 Wants=network-online.target
+# The node is ready when its REST /ready endpoint reports ready; operator
+# probes should poll that endpoint (or `sancli --rpc ... health`) rather than
+# using systemd's notification protocol (the node has no sd_notify support).
 
 [Service]
 Type=simple
@@ -18,6 +21,9 @@ KillSignal=SIGTERM
 TimeoutStopSec=30
 Restart=on-failure
 RestartSec=5
+# Restart storms are bounded: 5 restarts per 10 minutes, then stay failed.
+StartLimitIntervalSec=600
+StartLimitBurst=5
 
 # Hardening
 NoNewPrivileges=true
@@ -28,14 +34,21 @@ PrivateDevices=true
 ProtectKernelTunables=true
 ProtectKernelModules=true
 ProtectControlGroups=true
+ProtectClock=true
+ProtectHostname=true
 RestrictSUIDSGID=true
 RestrictNamespaces=true
+RestrictRealtime=true
 LockPersonality=true
 RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
 SystemCallArchitectures=native
 CapabilityBoundingSet=
 AmbientCapabilities=
 LimitNOFILE=65536
+TasksMax=4096
+UMask=0077
+# LMDB needs a writable data directory and (for the peer cache) nothing else;
+# everything under @CONFIG_DIR@ (TLS material, san.env) stays read-only.
 ReadWritePaths=@DATA_DIR@
 
 [Install]

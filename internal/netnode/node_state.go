@@ -1063,6 +1063,18 @@ func (n *Node) commitBlock(block *ledger.Block, historical bool) bool {
 	}
 
 	receipts, _ := outcome["receipts"].([]any)
+	executionFailures := int64(0)
+	gasUsed := int64(0)
+	for _, raw := range receipts {
+		receipt, ok := raw.(map[string]any)
+		if !ok {
+			continue
+		}
+		gasUsed += int64Value(receipt["gas_used"])
+		if receipt["status"] == "failed" {
+			executionFailures++
+		}
+	}
 	n.receipts[block.Index] = receipts
 	if len(n.receipts) > 128 {
 		for index := range n.receipts {
@@ -1074,6 +1086,8 @@ func (n *Node) commitBlock(block *ledger.Block, historical bool) bool {
 	n.incMetric("blocks_committed")
 	n.metricsMu.Lock()
 	n.metrics["transactions_committed"] += int64(len(block.Transactions))
+	n.metrics["gas_used"] += gasUsed
+	n.metrics["execution_failures"] += executionFailures
 	n.metricsMu.Unlock()
 
 	n.blockchain.Chain = append(n.blockchain.Chain, block)

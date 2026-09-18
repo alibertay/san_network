@@ -67,6 +67,25 @@ type NodeTransport interface {
 	ReleaseInboundPeer(address string)
 }
 
+// byteCounter is implemented by nodes that expose traffic counters; the
+// transport uses an optional interface so test stubs stay unaffected.
+type byteCounter interface {
+	AddBytesSent(int64)
+	AddBytesReceived(int64)
+}
+
+func countSent(node NodeTransport, size int) {
+	if counter, ok := node.(byteCounter); ok {
+		counter.AddBytesSent(int64(size))
+	}
+}
+
+func countReceived(node NodeTransport, size int) {
+	if counter, ok := node.(byteCounter); ok {
+		counter.AddBytesReceived(int64(size))
+	}
+}
+
 // PeerStream is a JSON-message session over a gRPC bidirectional stream.
 type PeerStream struct {
 	inbound       chan string
@@ -198,6 +217,7 @@ func (server *p2pServer) Session(stream grpc.BidiStreamingServer[netproto.Envelo
 			if err != nil {
 				return
 			}
+			countReceived(server.node, len(envelope.Payload))
 			select {
 			case inbound <- string(envelope.Payload):
 			case <-peerStream.Done():
@@ -224,6 +244,7 @@ func (server *p2pServer) Session(stream grpc.BidiStreamingServer[netproto.Envelo
 					sendErr <- err
 					return
 				}
+				countSent(server.node, len(message))
 			case <-peerStream.Done():
 				// Flush messages queued before the close.
 				for {
@@ -233,6 +254,7 @@ func (server *p2pServer) Session(stream grpc.BidiStreamingServer[netproto.Envelo
 							sendErr <- err
 							return
 						}
+						countSent(server.node, len(message))
 					default:
 						sendErr <- nil
 						return
@@ -403,6 +425,7 @@ func OpenSession(ctx context.Context, node NodeTransport, peer map[string]any, p
 					reportSender(err)
 					return
 				}
+				countSent(node, len(message))
 			case <-peerStream.Done():
 				// Flush messages queued before the close so a one-shot
 				// session never drops its last message on the floor.
@@ -413,6 +436,7 @@ func OpenSession(ctx context.Context, node NodeTransport, peer map[string]any, p
 							reportSender(err)
 							return
 						}
+						countSent(node, len(message))
 					default:
 						reportSender(nil)
 						return
@@ -432,6 +456,7 @@ func OpenSession(ctx context.Context, node NodeTransport, peer map[string]any, p
 				}
 				return
 			}
+			countReceived(node, len(envelope.Payload))
 			select {
 			case inbound <- string(envelope.Payload):
 			case <-peerStream.Done():

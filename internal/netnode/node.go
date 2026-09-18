@@ -25,6 +25,7 @@ import (
 	"github.com/alibertay/san_network/internal/canonical"
 	"github.com/alibertay/san_network/internal/ledger"
 	"github.com/alibertay/san_network/internal/ledger/store"
+	"github.com/alibertay/san_network/internal/sanlog"
 	"github.com/alibertay/san_network/internal/sanvm"
 
 	"google.golang.org/grpc"
@@ -137,6 +138,11 @@ type Node struct {
 	// Receipts of recent blocks and operational counters.
 	receipts map[int64][]any
 	metrics  map[string]int64
+
+	// Observability state (Batch D).
+	reorgDepth int64
+	startedAt  time.Time
+	readyState string
 
 	lastSeenBlockIndex int64
 	chainHashes        map[string]struct{}
@@ -268,6 +274,24 @@ func newNode(config NodeConfig, identity *ledger.NodeIdentity, kv store.KeyValue
 			"staged_votes_rejected":      0,
 			"peers_rejected_table":       0,
 			"vote_seen_cache_resets":     0,
+			// Observability expansion (Batch D). Counters stay in the same
+			// map so /metrics exposes them next to the Python-parity prefix.
+			"transactions_accepted":   0,
+			"transactions_rejected":   0,
+			"transactions_duplicated": 0,
+			"execution_failures":      0,
+			"gas_used":                0,
+			"validation_failures":     0,
+			"peers_reconnects":        0,
+			"handshakes_failed":       0,
+			"peer_invalid_messages":   0,
+			"sync_attempts":           0,
+			"sync_failures":           0,
+			"bytes_sent":              0,
+			"bytes_received":          0,
+			"controller_approvals":    0,
+			"controller_failures":     0,
+			"api_rate_limited":        0,
 		},
 		lastSeenBlockIndex: blockchain.Tip().Index,
 		chainHashes:        map[string]struct{}{},
@@ -369,6 +393,7 @@ func (n *Node) Start(ctx context.Context) error {
 	go func() { defer n.wg.Done(); n.blockProductionLoop(runCtx) }()
 
 	n.mu.Lock()
+	n.startedAt = time.Now()
 	peerCount := len(n.PEERS)
 	n.mu.Unlock()
 	if peerCount > 0 {
@@ -378,9 +403,17 @@ func (n *Node) Start(ctx context.Context) error {
 		}
 	}
 
-	log.Printf("Node started (api=%d p2p=%d peer=%d controller=%d peers=%d tls=%v db=%v)",
-		n.config.APIPort, n.config.P2PPort, n.config.PeerPort, n.config.ControllerPort,
-		peerCount, n.config.TLSEnabled(), n.store != nil)
+	sanlog.Info("node started", sanlog.Fields(
+		"node_id", n.GetPublicKey(),
+		"chain_id", n.chainID,
+		"api_port", n.config.APIPort,
+		"p2p_port", n.config.P2PPort,
+		"peer_port", n.config.PeerPort,
+		"controller_port", n.config.ControllerPort,
+		"peers", peerCount,
+		"tls", n.config.TLSEnabled(),
+		"database", n.store != nil,
+	))
 	return nil
 }
 
@@ -505,11 +538,21 @@ func (n *Node) VerifyHello(data map[string]any) bool {
 		return false
 	}
 	if int64Value(data["protocol"]) != ProtocolVersion {
-		log.Printf("Handshake rejected: protocol %v", data["protocol"])
+		n.incMetric("handshakes_failed")
+		sanlog.Warn("handshake rejected", sanlog.Fields(
+			"error_type", "protocol",
+			"peer_protocol", data["protocol"],
+			"local_protocol", ProtocolVersion,
+		))
 		return false
 	}
 	if chainID, _ := data["chain_id"].(string); chainID != n.chainID {
-		log.Printf("Handshake rejected: chain_id %v does not match %q", data["chain_id"], n.chainID)
+		n.incMetric("handshakes_failed")
+		sanlog.Warn("handshake rejected", sanlog.Fields(
+			"error_type", "chain_id",
+			"peer_chain_id", chainID,
+			"chain_id", n.chainID,
+		))
 		return false
 	}
 	timestamp, ok := numericValue(data["timestamp"])
@@ -517,7 +560,8 @@ func (n *Node) VerifyHello(data map[string]any) bool {
 		return false
 	}
 	if math.Abs(nowSeconds()-timestamp) > HelloTTL {
-		log.Printf("Handshake rejected: stale timestamp")
+		n.incMetric("handshakes_failed")
+		sanlog.Warn("handshake rejected", sanlog.Fields("error_type", "stale_timestamp"))
 		return false
 	}
 	publicKey, _ := data["public_key"].(string)
@@ -941,13 +985,31 @@ func (n *Node) MetricsSnapshot() map[string]any {
 	for _, stake := range active {
 		totalStake += stake
 	}
+	inbound := int64(0)
+	for _, count := range n.inboundIPs {
+		inbound += int64(count)
+	}
+	peers := int64(len(n.PEERS))
+	outbound := peers - inbound
+	if outbound < 0 {
+		outbound = 0
+	}
+	mempoolBytes := int64(0)
+	for _, tx := range n.transactionPool {
+		mempoolBytes += int64(len(tx.Data))
+	}
+	proposerRound := int64(0)
+	if n.proposerState != nil && n.proposerState.Height == height+1 {
+		proposerRound = n.proposerState.Round
+	}
 	result := map[string]any{
 		"height":             height,
 		"finalized_height":   n.finalizedHeight,
-		"peers":              int64(len(n.PEERS)),
+		"peers":              peers,
 		"controllers":        int64(len(n.controllerNodes)),
 		"controllers_target": int64(n.config.ControllerCount),
 		"mempool":            int64(len(n.transactionPool)),
+		"mempool_bytes":      mempoolBytes,
 		"validators":         int64(len(active)),
 		"total_stake_units":  totalStake,
 		"total_slashed":      n.blockchain.TotalSlashed,
@@ -956,6 +1018,11 @@ func (n *Node) MetricsSnapshot() map[string]any {
 		"contracts":          int64(len(n.storage.Contracts)),
 		"orphans":            int64(len(n.orphans)),
 		"peer_bans_active":   n.activePeerBansLocked(),
+		"peers_inbound":      inbound,
+		"peers_outbound":     outbound,
+		"reorg_depth":        n.reorgDepth,
+		"proposer_round":     proposerRound,
+		"pending_finality":   int64(len(n.pendingVotes)),
 	}
 	n.mu.Unlock()
 

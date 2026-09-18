@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"log"
 	"sort"
+	"strings"
 
 	"github.com/alibertay/san_network/internal/canonical"
 	"github.com/alibertay/san_network/internal/ledger"
+	"github.com/alibertay/san_network/internal/sanlog"
 )
 
 // ---------------------------------------------------------------------- #
@@ -485,7 +487,14 @@ func (n *Node) tallyFinality(height int64, blockHash string) {
 			}
 		}
 	}
-	log.Printf("Block %d finalized with %d/%d voting stake", height, votedStake, totalStake)
+	sanlog.Info("block finalized", sanlog.Fields(
+		"chain_id", n.chainID,
+		"height", height,
+		"block_hash", blockHash,
+		"validator", block.Validator,
+		"voted_stake", votedStake,
+		"total_stake", totalStake,
+	))
 }
 
 // AttestationState is the validator set and finality checkpoint.
@@ -554,15 +563,25 @@ func (n *Node) SubmitTransaction(payload map[string]any) (map[string]any, error)
 	transaction, err := ledger.NewTransaction(payload, &rate)
 	if err != nil {
 		n.mu.Unlock()
+		n.incMetric("transactions_rejected")
 		return nil, fmt.Errorf("Invalid transaction: %v", err)
 	}
 	// Python raises the validation error straight out of submit_transaction.
 	if err := n.validateTransactionForMempool(transaction); err != nil {
 		n.mu.Unlock()
+		n.noteTransactionRejected(err)
 		return nil, err
 	}
 	result, committedBlock := n.admitTransaction(transaction)
 	n.mu.Unlock()
+
+	status, _ := result["status"].(string)
+	switch status {
+	case "committed", "pooled":
+		n.incMetric("transactions_accepted")
+	default:
+		n.incMetric("transactions_rejected")
+	}
 
 	if committedBlock != nil {
 		n.maybeVote(committedBlock)
@@ -570,6 +589,16 @@ func (n *Node) SubmitTransaction(payload map[string]any) (map[string]any, error)
 	}
 	n.gossipTransaction(transaction)
 	return result, nil
+}
+
+// noteTransactionRejected distinguishes duplicate submissions from other
+// validation failures for /metrics.
+func (n *Node) noteTransactionRejected(err error) {
+	if strings.Contains(err.Error(), "duplicate transaction") {
+		n.incMetric("transactions_duplicated")
+		return
+	}
+	n.incMetric("transactions_rejected")
 }
 
 // IngestTransaction validates, pools and gossips a transaction; True when it
@@ -584,28 +613,33 @@ func (n *Node) IngestTransaction(payload any) bool {
 	transaction, err := ledger.NewTransaction(payloadMap, &rate)
 	if err != nil {
 		n.mu.Unlock()
+		n.incMetric("transactions_rejected")
 		log.Printf("Rejected transaction: %v", err)
 		return false
 	}
 	if err := n.validateTransactionForMempool(transaction); err != nil {
 		n.mu.Unlock()
+		n.noteTransactionRejected(err)
 		log.Printf("Rejected transaction: %v", err)
 		return false
 	}
 	txID := ledger.TxID(transaction.Payload)
 	if _, pooled := n.poolTxIDs[txID]; pooled {
 		n.mu.Unlock()
+		n.incMetric("transactions_duplicated")
 		return false
 	}
 	if _, seen := n.seenTxGossip[txID]; seen {
 		n.mu.Unlock()
+		n.incMetric("transactions_duplicated")
 		return false
 	}
 	n.transactionPool = append(n.transactionPool, transaction)
 	n.poolTxIDs[txID] = struct{}{}
 	n.mu.Unlock()
 
-	log.Printf("Transaction added to the mempool: %s", txID)
+	n.incMetric("transactions_accepted")
+	sanlog.Info("transaction accepted", sanlog.Fields("tx_id", txID))
 	n.maybeProduceFromPool()
 	n.gossipTransaction(transaction)
 	return true

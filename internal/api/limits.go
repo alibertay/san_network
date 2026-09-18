@@ -16,9 +16,16 @@ const maxTrackedClients = 10_000
 // cap, on the Content-Length gate and on the read-side MaxBytesReader cap.
 var bodyLimitRejections atomic.Int64
 
+// rateLimitRejections counts every request rejected by the sliding-window
+// rate limiter.
+var rateLimitRejections atomic.Int64
+
 // BodyLimitRejections returns the process-wide count of rejected oversized
 // request bodies (Go-only resource-limit metric).
 func BodyLimitRejections() int64 { return bodyLimitRejections.Load() }
+
+// RateLimitRejections returns the process-wide count of rate-limited requests.
+func RateLimitRejections() int64 { return rateLimitRejections.Load() }
 
 // rateLimiter is the Go port of RateLimitMiddleware: a token-free sliding
 // window limiter per client IP plus a Content-Length body gate. Like the
@@ -104,6 +111,7 @@ func (l *rateLimiter) wrap(next http.Handler) http.Handler {
 		if len(bucket) >= l.limit {
 			l.hits[client] = bucket
 			l.mu.Unlock()
+			rateLimitRejections.Add(1)
 			writeError(w, http.StatusTooManyRequests, "rate limit exceeded")
 			return
 		}

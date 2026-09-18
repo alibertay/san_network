@@ -7,9 +7,10 @@ import (
 	"github.com/alibertay/san_network/internal/api"
 )
 
-// expectedZeroMetrics is the exact app/metrics.py output for an empty
-// snapshot (counter names/order and gauge names/order from app/metrics.py).
-const expectedZeroMetrics = `# TYPE san_blocks_committed counter
+// expectedPythonParityCounters is the exact counter section prefix of
+// app/metrics.py for an empty snapshot. Go appends its local-only counters
+// after it, then the gauge section.
+const expectedPythonParityCounters = `# TYPE san_blocks_committed counter
 san_blocks_committed 0
 # TYPE san_transactions_committed counter
 san_transactions_committed 0
@@ -39,37 +40,11 @@ san_reorgs 0
 san_slashing_events 0
 # TYPE san_governance_changes counter
 san_governance_changes 0
-# TYPE san_peer_penalties counter
-san_peer_penalties 0
-# TYPE san_peers_banned counter
-san_peers_banned 0
-# TYPE san_peers_rejected_inbound counter
-san_peers_rejected_inbound 0
-# TYPE san_peers_rejected_subnet counter
-san_peers_rejected_subnet 0
-# TYPE san_peers_rejected_banned counter
-san_peers_rejected_banned 0
-# TYPE san_peer_malformed_messages counter
-san_peer_malformed_messages 0
-# TYPE san_peer_rate_limit_hits counter
-san_peer_rate_limit_hits 0
-# TYPE san_peer_invalid_records counter
-san_peer_invalid_records 0
-# TYPE san_mempool_rejected counter
-san_mempool_rejected 0
-# TYPE san_orphans_evicted counter
-san_orphans_evicted 0
-# TYPE san_block_requests_rejected counter
-san_block_requests_rejected 0
-# TYPE san_staged_votes_rejected counter
-san_staged_votes_rejected 0
-# TYPE san_peers_rejected_table counter
-san_peers_rejected_table 0
-# TYPE san_vote_seen_cache_resets counter
-san_vote_seen_cache_resets 0
-# TYPE san_http_body_rejected counter
-san_http_body_rejected 0
-# TYPE san_height gauge
+`
+
+// expectedPythonParityGauges is the exact gauge section of app/metrics.py; the
+// Go-only gauges are appended after it.
+const expectedPythonParityGauges = `# TYPE san_height gauge
 san_height 0
 # TYPE san_finalized_height gauge
 san_finalized_height 0
@@ -93,18 +68,56 @@ san_base_fee 0
 san_contracts 0
 # TYPE san_orphans gauge
 san_orphans 0
-# TYPE san_controllers_target gauge
-san_controllers_target 0
-# TYPE san_peer_bans_active gauge
-san_peer_bans_active 0
 `
 
-func TestRenderMetricsZeroSnapshot(t *testing.T) {
-	if got := api.RenderMetrics(map[string]any{}); got != expectedZeroMetrics {
-		t.Errorf("zero snapshot mismatch:\n got:\n%s\nwant:\n%s", got, expectedZeroMetrics)
+// expectedGoOnlyCounters must be present after the Python prefix.
+var expectedGoOnlyCounters = []string{
+	"san_peer_penalties", "san_peers_banned", "san_peers_rejected_inbound",
+	"san_peers_rejected_subnet", "san_peers_rejected_banned",
+	"san_peer_malformed_messages", "san_peer_rate_limit_hits",
+	"san_peer_invalid_records", "san_mempool_rejected", "san_orphans_evicted",
+	"san_block_requests_rejected", "san_staged_votes_rejected",
+	"san_peers_rejected_table", "san_vote_seen_cache_resets",
+	"san_http_body_rejected", "san_transactions_accepted",
+	"san_transactions_rejected", "san_transactions_duplicated",
+	"san_execution_failures", "san_gas_used", "san_validation_failures",
+	"san_peers_reconnects", "san_handshakes_failed", "san_peer_invalid_messages",
+	"san_sync_attempts", "san_sync_failures", "san_bytes_sent",
+	"san_bytes_received", "san_controller_approvals",
+	"san_controller_failures", "san_api_rate_limited",
+}
+
+// expectedGoOnlyGauges must be present after the Python prefix.
+var expectedGoOnlyGauges = []string{
+	"san_controllers_target", "san_peer_bans_active", "san_peers_inbound",
+	"san_peers_outbound", "san_reorg_depth", "san_proposer_round",
+	"san_mempool_bytes", "san_pending_finality", "san_go_goroutines",
+	"san_go_memory_alloc_bytes", "san_go_memory_sys_bytes", "san_go_gc_cycles",
+	"san_uptime_seconds",
+}
+
+func TestRenderMetricsZeroSnapshotKeepsPythonParityPrefix(t *testing.T) {
+	if !strings.HasPrefix(expectedPythonParityCounters, "# TYPE san_blocks_committed counter") {
+		t.Fatal("parity fixture must start with the first Python counter")
 	}
-	if !strings.HasSuffix(expectedZeroMetrics, "\n") {
+	got := api.RenderMetrics(map[string]any{})
+	if !strings.HasPrefix(got, expectedPythonParityCounters) {
+		t.Errorf("Python parity counter prefix changed:\n got:\n%s", firstLines(got, 32))
+	}
+	if !strings.Contains(got, expectedPythonParityGauges+"# TYPE san_controllers_target gauge") {
+		t.Errorf("Python parity gauge block changed:\n got:\n%s", got)
+	}
+	if !strings.HasSuffix(got, "\n") {
 		t.Errorf("exposition must end with a newline")
+	}
+}
+
+func TestRenderMetricsExposesGoOnlyMetrics(t *testing.T) {
+	text := api.RenderMetrics(map[string]any{})
+	for _, name := range append(append([]string{}, expectedGoOnlyCounters...), expectedGoOnlyGauges...) {
+		if !strings.Contains(text, "# TYPE "+name+" ") {
+			t.Errorf("missing metric type declaration for %s", name)
+		}
 	}
 }
 
@@ -125,6 +138,10 @@ func TestRenderMetricsValues(t *testing.T) {
 		"base_fee":               int64(2),
 		"contracts":              int64(1),
 		"orphans":                int64(0),
+		"transactions_accepted":  int64(9),
+		"gas_used":               int64(1234),
+		"go_goroutines":          int64(42),
+		"uptime_seconds":         12.5,
 	}
 	text := api.RenderMetrics(snapshot)
 	for _, expected := range []string{
@@ -136,9 +153,21 @@ func TestRenderMetricsValues(t *testing.T) {
 		"san_finalized_height 10",
 		"san_total_stake_units 100000000000",
 		"san_contracts 1",
+		"san_transactions_accepted 9",
+		"san_gas_used 1234",
+		"san_go_goroutines 42",
+		"san_uptime_seconds 12.5",
 	} {
 		if !strings.Contains(text, expected) {
 			t.Errorf("missing %q in:\n%s", expected, text)
 		}
 	}
+}
+
+func firstLines(text string, count int) string {
+	lines := strings.SplitN(text, "\n", count+1)
+	if len(lines) > count {
+		lines = lines[:count]
+	}
+	return strings.Join(lines, "\n")
 }

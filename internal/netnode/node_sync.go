@@ -128,6 +128,7 @@ func (n *Node) Synchronize(ctx context.Context) bool {
 	if peer == nil {
 		return false
 	}
+	n.incMetric("sync_attempts")
 	batchLimit := n.config.SyncBatchSize
 	if batchLimit < 1 {
 		batchLimit = 1
@@ -145,16 +146,19 @@ func (n *Node) Synchronize(ctx context.Context) bool {
 	for applied < maxBlocks {
 		payload, err := n.remoteSync(ctx, peer, fromIndex, batchLimit)
 		if err != nil {
+			n.incMetric("sync_failures")
 			log.Printf("Sync with %s failed: %v", PeerLabel(peer), err)
 			return applied > 0
 		}
 
 		if peerAllocation, _ := payload["genesis_allocation"].(string); peerAllocation != "" &&
 			peerAllocation != n.genesisAllocationFingerprint() {
+			n.incMetric("sync_failures")
 			log.Printf("Sync: peer %s uses a different genesis allocation; refusing to sync", PeerLabel(peer))
 			return false
 		}
 		if peerChain, _ := payload["chain_id"].(string); peerChain != "" && peerChain != n.chainID {
+			n.incMetric("sync_failures")
 			log.Printf("Sync: peer %s is on chain %q while this node is on %q", PeerLabel(peer), peerChain, n.chainID)
 			return false
 		}
@@ -196,11 +200,13 @@ func (n *Node) Synchronize(ctx context.Context) bool {
 			tipFresh := n.blockchain.Tip().TimestampFloat() > nowSeconds()-BlockPastDrift
 			historical := !(tipFresh && block.Index == n.blockchain.Tip().Index+1)
 			if !n.verifyBlock(block, historical) {
+				n.incMetric("validation_failures")
 				log.Printf("Sync: block %d from %s failed verification; stopping", block.Index, PeerLabel(peer))
 				stop = true
 				break
 			}
 			if !n.commitBlock(block, historical) {
+				n.incMetric("validation_failures")
 				stop = true
 				break
 			}
@@ -536,6 +542,16 @@ func (n *Node) sendToControllers(ctx context.Context, controllers []map[string]a
 }
 
 func (n *Node) requestBlockVote(ctx context.Context, controller map[string]any, block *ledger.Block) bool {
+	approved := n.requestBlockVoteInner(ctx, controller, block)
+	if approved {
+		n.incMetric("controller_approvals")
+	} else {
+		n.incMetric("controller_failures")
+	}
+	return approved
+}
+
+func (n *Node) requestBlockVoteInner(ctx context.Context, controller map[string]any, block *ledger.Block) bool {
 	message, err := encodeObject(map[string]any{"type": "BLOCK_VOTE_REQUEST", "block": block.ToDict()})
 	if err != nil {
 		return false

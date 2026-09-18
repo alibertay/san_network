@@ -16,7 +16,7 @@ must be resolved before announcing the devnet.
 - [x] Go end-to-end check (`go run ./cmd/sane2e`, 6 steps)
 - [ ] GitHub Actions green on the target commit (lint fixes pushed; confirm run)
 - [ ] Fuzz targets run clean in CI (short smoke job)
-- [ ] Nightly soak job scheduled
+- [x] Nightly soak job scheduled (`.github/workflows/soak.yml`)
 
 ## Network and consensus
 
@@ -24,6 +24,8 @@ must be resolved before announcing the devnet.
 - [ ] 10-node test with independent data directories and ports
 - [x] Partition scenarios A-D automated (5/5, 7/3, proposer isolation, full split)
 - [ ] Long-running soak test (`cmd/sansoak`) passes for the agreed duration
+  (`cmd/sansoak --short` passes locally/CI and the nightly workflow runs a
+  10-minute 5-node soak; the 24h soak still needs a VPS run)
 - [x] Fork-choice torture suite (randomized branches, delayed parents)
 - [x] Crash-consistency tests (kill during commit/finality/prune) pass
 - [x] Validator churn suite (join, undelegate, withdraw, slash) passes
@@ -50,21 +52,27 @@ must be resolved before announcing the devnet.
 
 ## Observability and operations
 
-- [ ] Metrics expanded to the full chain/tx/network/consensus set
-- [ ] `/health` and `/ready` expose lifecycle states (starting/syncing/ready/degraded)
-- [ ] Version information exposed (`san-node version` + REST)
-- [ ] JSON structured logging with configurable levels
+- [x] Metrics expanded to the full chain/tx/network/consensus set
+- [x] Benchmark methodology documented (`cmd/sanbench`, `docs/benchmarks.md`)
+- [x] Post-quantum bandwidth analysis documented (`docs/pq-bandwidth.md`)
+- [x] `/health` and `/ready` expose lifecycle states (starting/syncing/ready/degraded)
+- [x] Version information exposed (`sanup version` + REST `/health.version_info`)
+- [x] JSON structured logging with configurable levels (`SAN_LOG_FORMAT`, `SAN_LOG_LEVEL`)
 - [ ] Dashboard and alerts configured for a public deployment
-- [ ] Log review confirms no secret leakage
+- [ ] Log review confirms no secret leakage (redaction is unit-tested:
+  `TestRedactionCoversCredentials`, `TestJSONHandlerRedactsFields`; a real
+  public log review is still due)
 
 ## Genesis and protocol
 
 - [x] Genesis fingerprint checked across peers before sync
 - [ ] Genesis file frozen and published for operators
 - [ ] Handshake carries chain id, genesis hash, protocol and software version
-- [ ] Incompatible protocol versions are rejected with a useful reason
+  (chain id and protocol are carried and enforced; genesis hash and software
+  version are not yet in HELLO — Batch E item, see `docs/rolling-upgrade.md`)
+- [x] Incompatible protocol versions are rejected with a useful reason
 - [x] Version endpoint exposes protocol and schema versions
-- [ ] Upgrade strategy documented (rolling vs coordinated)
+- [x] Upgrade strategy documented (rolling vs coordinated, `docs/rolling-upgrade.md`)
 
 ## Deployment
 
@@ -156,7 +164,14 @@ until the corresponding work lands.
   [docs/resource-limits.md](resource-limits.md). Regression tests: `TestMempoolLimitRejectsAndCounts`,
   `TestOrphanLimitEvictsAndCounts`, `TestBlockRequestLimitRejectsAndCounts`,
   `TestStagedVoteHashCapRejectsAndCounts`, `TestPeerTableLimitRejectsAndCounts`,
-  `TestSeenVoteCacheStaysBounded`.
+  `TestSeenVoteCacheStaysBounded`. Batch D appends the chain/tx/network/
+  consensus/runtime set after those (`transactions_accepted`,
+  `validation_failures`, `bytes_sent`/`bytes_received`, `peers_inbound`/
+  `peers_outbound`, `controller_approvals`/`controller_failures`,
+  `go_goroutines`, `go_memory_*`, `go_gc_cycles`, `uptime_seconds`,
+  `api_rate_limited`); the Python-parity prefix is unchanged and pinned by
+  `TestRenderMetricsZeroSnapshotKeepsPythonParityPrefix` and
+  `TestRenderMetricsExposesGoOnlyMetrics`.
 - **TLS trust equals genesis trust.** Without TLS (or with a shared devnet CA),
   a network-level attacker could serve a different genesis to a joining node.
 - **Mixed-implementation policy.** Python remains the reference and fixture
@@ -180,5 +195,45 @@ until the corresponding work lands.
   fallback; documented in `docs/interop.md`).
 - **External security audit has not been performed.** The published review is an
   internal, automated/adversarial code review (`docs/security-review.md`).
+- **Soak coverage is CI-short, not 24h.** `cmd/sansoak` spawns or targets
+  nodes, generates transfers/SANRC20/contract writes/staking/governance/churn
+  activity and asserts money conservation, height/finality convergence,
+  state-root and validator-set equality, stuck nodes, mempool bounds and
+  resource growth. The 70-second `--short` mode passes locally and in CI; the
+  nightly workflow runs a 10-minute 5-node soak; the 24-hour soak still needs a
+  VPS run. Report logic is unit-tested without network time (`TestEvaluate*`,
+  `TestCheckGrowth`, `TestReportRenderAndPass`).
+- **Benchmarks are single-host reference numbers.** `cmd/sanbench` measures
+  ML-DSA-44, transaction validation/serialization, SANVM workloads, block
+  validation and a loopback network lab. The published table was produced on
+  one Windows host (methodology and hardware in `docs/benchmarks.md`); it is
+  not a TPS promise and excludes consensus/disk I/O. `--full` adds the
+  5000-transaction block and the network lab.
+- **Post-quantum bandwidth is modelled, not load-tested.** `docs/pq-bandwidth.md`
+  computes per-node traffic for 10/50/100 nodes at 1/10/100 tx/s from measured
+  sizes. The model assumes flood transaction/block gossip and full-block
+  controller vote requests; the batching suggestions there are not implemented
+  because the wire format and consensus determinism must not change ad hoc.
+  This is the expected scaling ceiling for a 100-node devnet above ~10 tx/s.
+- **Logging is structured, but only key sites carry fields.** `SAN_LOG_FORMAT`
+  and `SAN_LOG_LEVEL` configure text/JSON output; `internal/sanlog` redacts
+  private keys, tokens, bearer headers and PEM blocks (tests:
+  `TestTextFormatKeepsMessageAndFields`, `TestJSONFormatEmitsStructuredRecord`,
+  `TestLevelFiltering`, `TestRedactionCoversCredentials`). Legacy
+  `log.Printf` call sites still produce plain messages, and the handshake does
+  not carry the software version, so version-tagged structured logs are
+  incomplete until Batch E.
+- **Readiness semantics are devnet-grade.** `/ready` returns 503 until the
+  node has listeners, identity, genesis and peers; in `SAN_PUBLIC_DEVNET` mode
+  it turns `degraded` when no peers are visible or the controller target is
+  below the configured minimum. Tests: `TestReadyStateLifecycle`,
+  `TestReadyStateDegradedWithoutPeers`, `TestReadyEndpointReportsStarting`.
+  It does not yet detect disk-full, clock skew or a stuck-but-reachable chain.
+- **Rolling upgrade is documented but unexercised on a multi-host devnet.**
+  The handshake protocol-version gate exists and is tested
+  (`TestByzantineHandshakeRejections`); `docs/rolling-upgrade.md` covers the
+  10-node one-at-a-time procedure and rollback. `deploy/deploy_test.go` lints
+  the systemd unit, Dockerfile and installer, but no automated multi-host
+  upgrade run exists yet.
 
 Not mainnet ready. Public devnet only.

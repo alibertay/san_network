@@ -8,6 +8,7 @@ import (
 
 	"github.com/alibertay/san_network/internal/ledger"
 	"github.com/alibertay/san_network/internal/netnode"
+	"github.com/alibertay/san_network/internal/version"
 )
 
 // Server is the HTTP handler exposing the FastAPI routes over a netnode.Node.
@@ -49,6 +50,7 @@ func (s *Server) requireNode(w http.ResponseWriter) *netnode.Node {
 
 func (s *Server) register(mux *http.ServeMux) {
 	mux.HandleFunc("GET /health", s.handleHealth)
+	mux.HandleFunc("GET /ready", s.handleReady)
 	mux.HandleFunc("GET /validators", s.handleValidators)
 	mux.HandleFunc("GET /genesis", s.handleGenesis)
 	mux.HandleFunc("GET /finality", s.handleFinality)
@@ -102,7 +104,23 @@ func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 		"mempool":          node.PendingCount(),
 		"contracts":        len(node.ListContracts()),
 		"validators":       node.ActiveValidatorCount(),
+		"version_info":     version.Resolve(netnode.ProtocolVersion, ledger.SchemaVersion).Map(),
 	})
+}
+
+// handleReady reports the lifecycle state; 200 only when ready, 503
+// otherwise (starting/syncing/degraded).
+func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
+	node := s.requireNode(w)
+	if node == nil {
+		return
+	}
+	state := node.ReadyState()
+	status := http.StatusServiceUnavailable
+	if ready, _ := state["ready"].(bool); ready {
+		status = http.StatusOK
+	}
+	writeJSON(w, status, state)
 }
 
 func (s *Server) handleValidators(w http.ResponseWriter, r *http.Request) {
@@ -282,6 +300,10 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	}
 	snapshot := node.MetricsSnapshot()
 	snapshot["http_body_rejected"] = BodyLimitRejections()
+	snapshot["api_rate_limited"] = RateLimitRejections()
+	for name, value := range RuntimeSnapshot() {
+		snapshot[name] = value
+	}
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
 	_, _ = io.WriteString(w, RenderMetrics(snapshot))

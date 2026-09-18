@@ -3,11 +3,31 @@ package api
 import (
 	"encoding/json"
 	"math/big"
+	"runtime"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/alibertay/san_network/internal/canonical"
 )
+
+// processStarted is the wall-clock start used for the uptime gauge.
+var processStarted = time.Now()
+
+// RuntimeSnapshot renders the standard-library runtime metrics as gauges.
+// It uses runtime.ReadMemStats directly (no external dependency) so the
+// scraped text stays Prometheus friendly.
+func RuntimeSnapshot() map[string]any {
+	var memory runtime.MemStats
+	runtime.ReadMemStats(&memory)
+	return map[string]any{
+		"go_goroutines":         int64(runtime.NumGoroutine()),
+		"go_memory_alloc_bytes": int64(memory.Alloc),
+		"go_memory_sys_bytes":   int64(memory.Sys),
+		"go_gc_cycles":          int64(memory.NumGC),
+		"uptime_seconds":        time.Since(processStarted).Seconds(),
+	}
+}
 
 // CounterNames and GaugeNames mirror app/metrics.py order exactly for the
 // shared metrics; Go-only local peer-management metrics are appended after
@@ -45,6 +65,24 @@ var counterNames = []string{
 	"peers_rejected_table",
 	"vote_seen_cache_resets",
 	"http_body_rejected",
+	// Batch D observability: transaction, chain, network and consensus
+	// counters (Go-only, appended after the Batch C block).
+	"transactions_accepted",
+	"transactions_rejected",
+	"transactions_duplicated",
+	"execution_failures",
+	"gas_used",
+	"validation_failures",
+	"peers_reconnects",
+	"handshakes_failed",
+	"peer_invalid_messages",
+	"sync_attempts",
+	"sync_failures",
+	"bytes_sent",
+	"bytes_received",
+	"controller_approvals",
+	"controller_failures",
+	"api_rate_limited",
 }
 
 var gaugeNames = []string{
@@ -62,6 +100,19 @@ var gaugeNames = []string{
 	"orphans",
 	"controllers_target",
 	"peer_bans_active",
+	// Batch D observability gauges.
+	"peers_inbound",
+	"peers_outbound",
+	"reorg_depth",
+	"proposer_round",
+	"mempool_bytes",
+	"pending_finality",
+	// Runtime gauges from the standard library runtime/metrics surface.
+	"go_goroutines",
+	"go_memory_alloc_bytes",
+	"go_memory_sys_bytes",
+	"go_gc_cycles",
+	"uptime_seconds",
 }
 
 // RenderMetrics reproduces app.metrics.render_metrics line for line.

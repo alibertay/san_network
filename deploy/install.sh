@@ -219,11 +219,20 @@ fi
 log "building sannode, sanup and sancli for $("$GO_BIN" env GOOS)/$("$GO_BIN" env GOARCH) (cgo=$CGO)"
 BUILD_DIR=$(mktemp -d)
 trap 'rm -rf "$BUILD_DIR"' EXIT INT TERM
+# Inject version metadata so `sanup version` / REST /health report the exact
+# revision; falls back to "dev" outside a git checkout.
+SAN_VERSION=$(git -C "$ROOT_DIR" describe --tags --abbrev=0 2>/dev/null || echo dev)
+SAN_COMMIT=$(git -C "$ROOT_DIR" rev-parse HEAD 2>/dev/null || echo unknown)
+SAN_BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+VERSION_LDFLAGS="-X github.com/alibertay/san_network/internal/version.Version=$SAN_VERSION \
+-X github.com/alibertay/san_network/internal/version.Commit=$SAN_COMMIT \
+-X github.com/alibertay/san_network/internal/version.BuildDate=$SAN_BUILD_DATE"
+log "version metadata: $SAN_VERSION ($SAN_COMMIT, $SAN_BUILD_DATE)"
 (
     cd "$ROOT_DIR"
-    CGO_ENABLED=$CGO "$GO_BIN" build -buildvcs=false $GO_TAGS -trimpath -ldflags="-s -w" -o "$BUILD_DIR/sannode" ./cmd/sannode
-    CGO_ENABLED=$CGO "$GO_BIN" build -buildvcs=false $GO_TAGS -trimpath -ldflags="-s -w" -o "$BUILD_DIR/sanup" ./cmd/sanup
-    CGO_ENABLED=$CGO "$GO_BIN" build -buildvcs=false $GO_TAGS -trimpath -ldflags="-s -w" -o "$BUILD_DIR/sancli" ./cmd/sancli
+    CGO_ENABLED=$CGO "$GO_BIN" build -buildvcs=false $GO_TAGS -trimpath -ldflags="-s -w $VERSION_LDFLAGS" -o "$BUILD_DIR/sannode" ./cmd/sannode
+    CGO_ENABLED=$CGO "$GO_BIN" build -buildvcs=false $GO_TAGS -trimpath -ldflags="-s -w $VERSION_LDFLAGS" -o "$BUILD_DIR/sanup" ./cmd/sanup
+    CGO_ENABLED=$CGO "$GO_BIN" build -buildvcs=false $GO_TAGS -trimpath -ldflags="-s -w $VERSION_LDFLAGS" -o "$BUILD_DIR/sancli" ./cmd/sancli
 )
 
 maybe_create_user

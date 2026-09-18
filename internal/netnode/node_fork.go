@@ -78,6 +78,7 @@ func (n *Node) connectOrphans() int {
 			}
 			delete(n.orphans, blockHash)
 			if !n.verifyBlock(block, false) || !n.commitBlock(block, false) {
+				n.incMetric("validation_failures")
 				log.Printf("Orphan block %d failed to connect", block.Index)
 				continue
 			}
@@ -98,6 +99,7 @@ func (n *Node) processIncomingBlock(block *ledger.Block) bool {
 	tip := n.blockchain.Tip()
 	if block.PreviousBlockHash == tip.CurrentBlockHash {
 		if !n.verifyBlock(block, false) {
+			n.incMetric("validation_failures")
 			log.Printf("Block %d failed verification; ignored", block.Index)
 			return false
 		}
@@ -122,6 +124,7 @@ func (n *Node) processIncomingBlock(block *ledger.Block) bool {
 		return false
 	}
 	if !n.verifyForkBlock(block) {
+		n.incMetric("validation_failures")
 		log.Printf("Orphan block %d failed signature checks", block.Index)
 		return false
 	}
@@ -140,6 +143,7 @@ func (n *Node) bufferForkBlock(block *ledger.Block) bool {
 		return false
 	}
 	if !n.verifyForkBlock(block) {
+		n.incMetric("validation_failures")
 		log.Printf("Fork block %d failed signature checks", block.Index)
 		return false
 	}
@@ -267,6 +271,13 @@ func (n *Node) tryReorg() bool {
 	}
 
 	n.incMetric("reorgs")
+	// Depth: blocks replaced below the new tip (the candidate may start at a
+	// pruned height, in which case candidate[0].Index-1 is a lower bound on
+	// the fork point).
+	forkIndex := candidate[0].Index - 1
+	if oldTip := oldChain[len(oldChain)-1].Index; oldTip-forkIndex > 0 {
+		n.noteReorgLocked(oldTip - forkIndex)
+	}
 	n.requeueTransactions(oldChain, candidate)
 	if n.store != nil {
 		_, _ = n.store.DeleteMismatchedSnapshots(n.canonicalHashAt)

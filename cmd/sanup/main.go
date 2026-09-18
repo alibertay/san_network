@@ -23,7 +23,10 @@ import (
 	"time"
 
 	"github.com/alibertay/san_network/internal/ledger"
+	"github.com/alibertay/san_network/internal/netnode"
+	"github.com/alibertay/san_network/internal/sanlog"
 	"github.com/alibertay/san_network/internal/sdk"
+	"github.com/alibertay/san_network/internal/version"
 )
 
 const usageText = `usage: sanup [options]
@@ -159,6 +162,13 @@ func main() {
 }
 
 func run(argv []string, stdout, stderr io.Writer) int {
+	if _, err := sanlog.ConfigureFromEnv(); err != nil {
+		fmt.Fprintf(stderr, "sanup: %v\n", err)
+	}
+	if len(argv) > 0 && argv[0] == "version" {
+		fmt.Fprintln(stdout, version.Resolve(netnode.ProtocolVersion, ledger.SchemaVersion))
+		return 0
+	}
 	if os.Getenv("SANUP_CHILD") == "1" {
 		return runChild(stdout, stderr)
 	}

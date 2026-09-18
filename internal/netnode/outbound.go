@@ -109,10 +109,17 @@ func (n *Node) maintainOutbound(ctx context.Context) {
 		}
 		known[key] = true
 		attempts++
+		retrying := false
+		if entry, ok := n.addrman.info(record); ok && entry.Failures > 0 {
+			retrying = true
+		}
 		n.addrman.MarkTried(record)
 		if n.dialOutbound(ctx, record) {
 			n.addrman.MarkSuccess(record)
 			n.notePeerSignal(record, scoreSignalHealth)
+			if retrying {
+				n.incMetric("peers_reconnects")
+			}
 			continue
 		}
 		if n.addrman.MarkFailure(record) {

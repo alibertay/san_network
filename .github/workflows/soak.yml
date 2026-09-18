@@ -1,0 +1,42 @@
+name: Nightly soak
+
+on:
+  schedule:
+    - cron: "0 3 * * *"
+  workflow_dispatch:
+    inputs:
+      duration:
+        description: soak duration (Go duration, e.g. 10m)
+        required: false
+        default: 10m
+      nodes:
+        description: number of nodes (1-5)
+        required: false
+        default: "5"
+
+jobs:
+  soak:
+    name: Long soak (5 nodes)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          cache: true
+      - name: Install C toolchain (LMDB-enabled builds)
+        run: sudo apt-get update && sudo apt-get install -y build-essential
+      - name: Run the soak
+        env:
+          SOAK_DURATION: ${{ github.event.inputs.duration || '10m' }}
+          SOAK_NODES: ${{ github.event.inputs.nodes || '5' }}
+        run: |
+          go run ./cmd/sansoak --nodes "$SOAK_NODES" --duration "$SOAK_DURATION" \
+            --json --report soak-report.json
+      - name: Upload soak report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: soak-report
+          path: soak-report.json

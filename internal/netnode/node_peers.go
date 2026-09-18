@@ -12,6 +12,7 @@ import (
 
 	"github.com/alibertay/san_network/internal/canonical"
 	"github.com/alibertay/san_network/internal/ledger"
+	"github.com/alibertay/san_network/internal/sanlog"
 )
 
 // ---------------------------------------------------------------------- #
@@ -757,6 +758,7 @@ func (n *Node) PeerSession(ctx context.Context, stream *PeerStream) error {
 		}
 		if err := n.dispatchPeerMessage(ctx, stream, raw); err != nil {
 			n.noteMalformedMessage(stream.PeerKey)
+			n.incMetric("peer_invalid_messages")
 			log.Printf("Peer message failed: %v", err)
 		}
 	}
@@ -772,10 +774,14 @@ func (n *Node) acceptHandshake(ctx context.Context, stream *PeerStream) bool {
 	}
 	data, err := decodeObject(raw)
 	if err != nil {
+		n.incMetric("handshakes_failed")
+		n.incMetric("peer_invalid_messages")
 		log.Printf("Handshake failed: %v", err)
 		return false
 	}
 	if messageType, _ := data["type"].(string); messageType != "HELLO" || !n.VerifyHello(data) {
+		n.incMetric("handshakes_failed")
+		n.incMetric("peer_invalid_messages")
 		log.Printf("Rejected connection: invalid handshake")
 		stream.Close()
 		return false
@@ -921,7 +927,12 @@ func (n *Node) handlePeerMessage(ctx context.Context, stream *PeerStream, raw st
 		n.handleFinalityVote(data["vote"])
 		return nil
 	}
-	log.Printf("Unknown peer message type: %v", messageType)
+	n.incMetric("peer_invalid_messages")
+	sanlog.Warn("unknown peer message type", sanlog.Fields(
+		"error_type", "unknown_message_type",
+		"message_type", fmt.Sprintf("%v", messageType),
+		"peer", stream.PeerKey,
+	))
 	return nil
 }
 
