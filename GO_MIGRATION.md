@@ -40,6 +40,22 @@ cross-checking.
 | `run.py`, `scripts/run_node.py` | `cmd/sannode` |
 | `scripts/genesis_bootstrap.py` | `cmd/sangenesis` |
 
+## Documentation
+
+The protocol internals are documented in `docs/`:
+
+- [docs/chaos-limited-consensus.md](docs/chaos-limited-consensus.md) — the
+  consensus mechanism (proposer rounds and bounded fallback, block validity,
+  finality and slashing, governance, fork choice, determinism).
+- [docs/gossip.md](docs/gossip.md) — the P2P layer (signed peer records,
+  health checks, message types, propagation, chain sync, hardening).
+
+Both documents cover the Go implementation and point out where Python
+differs. `README.md` links them from the Go section. For the day-to-day
+bring-up workflow (`scripts/go_node.py`, `tools/go_e2e_check.py`) see
+[Start your Go node (bring-up script)](#start-your-go-node-bring-up-script)
+below.
+
 ## Parity fixtures
 
 `tools/parity_fixtures.py` runs the Python implementation and writes
