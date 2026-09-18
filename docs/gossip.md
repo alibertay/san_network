@@ -65,6 +65,10 @@ The REST API complements the P2P layer:
 * `POST /join` reads `SAN_BOOTSTRAP`, fetches peers through the REST
   endpoint (`DiscoverPeers`) and registers (`handleJoin`,
   `internal/api/server.go:409`).
+* `POST /faucet` is an optional, node-local endpoint (`SAN_FAUCET=1`): it
+  builds a normal transfer signed by the node identity and submits it through
+  the ordinary mempool path (`internal/api/faucet.go`), so funded transactions
+  are gossiped like any user transaction.
 
 ---
 
@@ -541,7 +545,7 @@ retry policy is a strict extension that changes nothing on the wire.
 | Peer record freshness | ±`SAN_PEER_TTL` (default 300 s) and signature verification; unsigned records rejected by default. |
 | Dead-peer claims | `DEAD_PEER` is not trusted; eviction requires the local ping threshold. |
 | Orphan/request bounds | `SAN_MAX_ORPHANS` buffered fork blocks, `SAN_MAX_REORG_DEPTH` reorg bound, 512 in-flight block requests (reset when exceeded). |
-| TLS | server certificate from `SAN_TLS_CERT`/`SAN_TLS_KEY`; clients verify with `SAN_TLS_CA` or the system trust store; with TLS the peer host is pinned via `grpc.WithAuthority(host)` for self-signed certificates (`dialPeer`, `TransportClientCredentials`). `sanup cert` generates a devnet CA + node certificate for this. |
+| TLS | server certificate from `SAN_TLS_CERT`/`SAN_TLS_KEY`; clients verify with `SAN_TLS_CA` or the system trust store; with TLS the peer host is pinned via `grpc.WithAuthority(host)` for self-signed certificates (`dialPeer`, `TransportClientCredentials`). `sanup cert --ca-only` creates one shared devnet CA and `sanup cert --ca-dir` signs per-node certificates from it (the CA key never leaves the CA machine); see [public-devnet.md](public-devnet.md#2-shared-devnet-ca). |
 | Outbound backpressure | `PeerStream.Close` waits at most 500 ms for the sender, then closes the gRPC connection to unblock a sender stuck in flow control; `CloseSend` is only called once the sender stopped (calling it concurrently with `Send` races inside gRPC). Regression test: `internal/netnode/transport_leak_test.go` (F15 fixed). |
 | Vote bounds | `VoteMaxBytes`, `VoteLookahead` and staged-voter caps (see the consensus document). |
 
@@ -633,7 +637,10 @@ retry policy is a strict extension that changes nothing on the wire.
   than 3 s to answer is treated as unreachable by the Go node.
 * **TLS trust.** Without `SAN_TLS_CA`, both implementations use the system
   trust store and log a warning; self-signed deployments must configure the
-  CA and rely on the pinned authority/host override.
+  CA and rely on the pinned authority/host override. The public-devnet CA flow
+  (one shared CA, per-node certificates, `ca.key` never distributed) and the
+  plaintext phase-1 trade-off are in
+  [public-devnet.md](public-devnet.md#2-shared-devnet-ca).
 * **Local discovery is Go-only.** The registry/auto-discovery loop
   (section 2.5) has no Python counterpart; a Go node can find Python nodes via
   bootstrap/probing, but Python nodes cannot read the registry. A live

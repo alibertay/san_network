@@ -84,6 +84,7 @@ func run(stdout, stderr io.Writer) int {
 		{"2. SANRC20 token", h.stepSANRC20},
 		{"3. custom contract", h.stepCustomContract},
 		{"4. stake 0 -> 100 -> 70", h.stepStake},
+		{"5. faucet funds a fresh wallet", h.stepFaucet},
 	} {
 		logf(stdout, "\n=== %s ===", step.name)
 		err := step.run(stdout)

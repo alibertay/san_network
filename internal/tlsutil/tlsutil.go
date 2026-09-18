@@ -4,7 +4,11 @@
 //	ca.crt / ca.key    (shared trust anchor, distribute ca.crt only)
 //	node.crt / node.key (SANs: the advertised DNS/IP hosts + localhost)
 //
-// The node key is written 0600; the CA private key is 0600 as well.
+// A public devnet shares one CA: the operator runs GenerateCA (or
+// `sanup cert --ca-only`) once on the CA machine and then SignNodeCert (or
+// `sanup cert --ca-dir ...`) for every node. GenerateDevnetCerts keeps the
+// original single-directory behavior (new CA + node cert). The node key is
+// written 0600; the CA private key is 0600 as well.
 package tlsutil
 
 import (
@@ -40,15 +44,32 @@ const (
 // node.key in dir for the given DNS names / IP addresses. localhost and the
 // loopback addresses are always included so health checks on the node work.
 func GenerateDevnetCerts(dir string, hosts []string) (Paths, error) {
+	caPaths, err := GenerateCA(dir)
+	if err != nil {
+		return Paths{}, err
+	}
+	nodePaths, err := SignNodeCert(dir, dir, hosts)
+	if err != nil {
+		return caPaths, err
+	}
+	return Paths{
+		CACert:   caPaths.CACert,
+		CAKey:    caPaths.CAKey,
+		NodeCert: nodePaths.NodeCert,
+		NodeKey:  nodePaths.NodeKey,
+	}, nil
+}
+
+// GenerateCA creates (or overwrites) only ca.crt (0644) and ca.key (0600) in
+// dir. Use SignNodeCert afterwards to issue node certificates against it.
+func GenerateCA(dir string) (Paths, error) {
 	dir = strings.TrimSpace(dir)
 	if dir == "" {
 		return Paths{}, fmt.Errorf("certificate directory is required")
 	}
 	paths := Paths{
-		CACert:   filepath.Join(dir, "ca.crt"),
-		CAKey:    filepath.Join(dir, "ca.key"),
-		NodeCert: filepath.Join(dir, "node.crt"),
-		NodeKey:  filepath.Join(dir, "node.key"),
+		CACert: filepath.Join(dir, "ca.crt"),
+		CAKey:  filepath.Join(dir, "ca.key"),
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return Paths{}, err
@@ -79,6 +100,51 @@ func GenerateDevnetCerts(dir string, hosts []string) (Paths, error) {
 	if err := writePEM(paths.CAKey, "EC PRIVATE KEY", caKeyDER, 0o600); err != nil {
 		return Paths{}, err
 	}
+	return paths, nil
+}
+
+// HasCA reports whether a usable ca.crt/ca.key pair is present in dir.
+func HasCA(dir string) bool {
+	dir = strings.TrimSpace(dir)
+	if dir == "" {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, "ca.crt")); err != nil {
+		return false
+	}
+	if _, err := os.Stat(filepath.Join(dir, "ca.key")); err != nil {
+		return false
+	}
+	return true
+}
+
+// SignNodeCert loads ca.crt/ca.key from caDir and issues node.crt (0644) and
+// node.key (0600) in outDir for the given DNS names / IP addresses. The CA
+// files are never modified. It refuses to run when the CA files are missing or
+// the key does not match the certificate.
+func SignNodeCert(caDir, outDir string, hosts []string) (Paths, error) {
+	caDir = strings.TrimSpace(caDir)
+	outDir = strings.TrimSpace(outDir)
+	if caDir == "" {
+		return Paths{}, fmt.Errorf("CA directory is required")
+	}
+	if outDir == "" {
+		return Paths{}, fmt.Errorf("node certificate directory is required")
+	}
+	caCert, caKey, err := loadCA(caDir)
+	if err != nil {
+		return Paths{}, err
+	}
+
+	paths := Paths{
+		CACert:   filepath.Join(caDir, "ca.crt"),
+		CAKey:    filepath.Join(caDir, "ca.key"),
+		NodeCert: filepath.Join(outDir, "node.crt"),
+		NodeKey:  filepath.Join(outDir, "node.key"),
+	}
+	if err := os.MkdirAll(outDir, 0o700); err != nil {
+		return Paths{}, err
+	}
 
 	nodeKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
@@ -97,7 +163,7 @@ func GenerateDevnetCerts(dir string, hosts []string) (Paths, error) {
 			nodeTemplate.DNSNames = append(nodeTemplate.DNSNames, host)
 		}
 	}
-	nodeDER, err := x509.CreateCertificate(rand.Reader, nodeTemplate, caTemplate, &nodeKey.PublicKey, caKey)
+	nodeDER, err := x509.CreateCertificate(rand.Reader, nodeTemplate, caCert, &nodeKey.PublicKey, caKey)
 	if err != nil {
 		return Paths{}, err
 	}
@@ -112,6 +178,64 @@ func GenerateDevnetCerts(dir string, hosts []string) (Paths, error) {
 		return Paths{}, err
 	}
 	return paths, nil
+}
+
+// loadCA reads and validates an existing CA pair.
+func loadCA(caDir string) (*x509.Certificate, *ecdsa.PrivateKey, error) {
+	caCertPath := filepath.Join(caDir, "ca.crt")
+	caKeyPath := filepath.Join(caDir, "ca.key")
+	certPEM, err := os.ReadFile(caCertPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("cannot read the CA certificate %s (generate it with `sanup cert --ca-only`): %w", caCertPath, err)
+	}
+	block, _ := pem.Decode(certPEM)
+	if block == nil || block.Type != "CERTIFICATE" {
+		return nil, nil, fmt.Errorf("%s is not a PEM certificate", caCertPath)
+	}
+	caCert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, nil, fmt.Errorf("cannot parse the CA certificate %s: %w", caCertPath, err)
+	}
+	if !caCert.IsCA {
+		return nil, nil, fmt.Errorf("%s is not a CA certificate", caCertPath)
+	}
+
+	keyPEM, err := os.ReadFile(caKeyPath)
+	if err != nil {
+		return nil, nil, fmt.Errorf("cannot read the CA key %s: %w", caKeyPath, err)
+	}
+	keyBlock, _ := pem.Decode(keyPEM)
+	if keyBlock == nil {
+		return nil, nil, fmt.Errorf("%s is not a PEM private key", caKeyPath)
+	}
+	caKey, err := parseECPrivateKey(keyBlock)
+	if err != nil {
+		return nil, nil, fmt.Errorf("cannot parse the CA key %s: %w", caKeyPath, err)
+	}
+
+	publicKey, ok := caCert.PublicKey.(*ecdsa.PublicKey)
+	if !ok || !publicKey.Equal(&caKey.PublicKey) {
+		return nil, nil, fmt.Errorf("the CA key %s does not match %s; refusing to sign", caKeyPath, caCertPath)
+	}
+	return caCert, caKey, nil
+}
+
+func parseECPrivateKey(block *pem.Block) (*ecdsa.PrivateKey, error) {
+	switch block.Type {
+	case "EC PRIVATE KEY":
+		return x509.ParseECPrivateKey(block.Bytes)
+	case "PRIVATE KEY":
+		parsed, err := x509.ParsePKCS8PrivateKey(block.Bytes)
+		if err != nil {
+			return nil, err
+		}
+		if key, ok := parsed.(*ecdsa.PrivateKey); ok {
+			return key, nil
+		}
+		return nil, fmt.Errorf("unsupported private key type %T", parsed)
+	default:
+		return nil, fmt.Errorf("unsupported PEM block %q", block.Type)
+	}
 }
 
 func template(commonName string, validity time.Duration) (*x509.Certificate, error) {

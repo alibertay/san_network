@@ -4,7 +4,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -19,7 +21,7 @@ func (h *harness) stepStartDevnet(stdout io.Writer) error {
 	c := h.node("C")
 
 	logf(stdout, "-- starting the founder seed A with --stake 0 --")
-	if err := h.runNode(a, "--seed", "--stake", "0"); err != nil {
+	if err := h.runNode(a, "--seed", "--stake", "0", "--faucet"); err != nil {
 		return err
 	}
 	if err := h.waitHealthy(a, 90*time.Second); err != nil {
@@ -313,10 +315,66 @@ func (h *harness) stepStake(stdout io.Writer) error {
 	return nil
 }
 
+// stepFaucet funds a fresh wallet through the seed's faucet (SAN_FAUCET=1,
+// enabled in stepStartDevnet) using the `sanup faucet` CLI, then confirms the
+// balance and re-verifies the transaction signature.
+func (h *harness) stepFaucet(stdout io.Writer) error {
+	identity, err := ledger.GenerateIdentity()
+	if err != nil {
+		return err
+	}
+	address, err := ledger.AddressFromPublicKey(identity.PublicKey)
+	if err != nil {
+		return err
+	}
+	seed := h.node("A-seed")
+	logf(stdout, "funding fresh wallet %s through the seed faucet", address)
+
+	command := exec.Command(h.sanup, "faucet",
+		"--to", address,
+		"--amount", "10",
+		"--rpc", fmt.Sprintf("http://127.0.0.1:%d", seed.api))
+	command.Dir = h.root
+	command.Env = h.env
+	output, err := command.CombinedOutput()
+	for _, line := range strings.Split(strings.TrimRight(string(output), "\n"), "\n") {
+		if strings.TrimSpace(line) != "" {
+			logf(stdout, "    | %s", line)
+		}
+	}
+	if err != nil {
+		return fmt.Errorf("sanup faucet failed: %w", err)
+	}
+	match := regexp.MustCompile(`tx ([0-9a-f]{64})`).FindStringSubmatch(string(output))
+	if len(match) < 2 {
+		return fmt.Errorf("faucet output has no tx id: %s", strings.TrimSpace(string(output)))
+	}
+	txID := match[1]
+
+	if err := waitUntil(60*time.Second, "faucet balance 10 SAN", func() bool {
+		return h.balanceUnits(seed, address) == 10*sanBase
+	}); err != nil {
+		return err
+	}
+	record, err := h.client("A-seed", false).Transaction(txID)
+	if err != nil {
+		return fmt.Errorf("cannot fetch faucet tx %s: %w", txID, err)
+	}
+	transaction, _ := record["transaction"].(map[string]any)
+	if transaction == nil || !ledger.VerifyTransaction(transaction) {
+		return fmt.Errorf("faucet tx %s does not verify", txID)
+	}
+	if sender, _ := transaction["sender"].(string); sender != seed.identity.PublicKeyHex() {
+		return fmt.Errorf("faucet tx sender %v is not the seed identity", transaction["sender"])
+	}
+	logf(stdout, "faucet tx %s verified; balance is %s SAN",
+		txID, ledger.UnitsToSAN(h.balanceUnits(seed, address)))
+	return nil
+}
+
 func (h *harness) query(contractID, function string, params []any) (any, error) {
 	return h.client("A-seed", false).ContractQuery(contractID, function, params)
 }
-
 func (h *harness) queryOr(contractID, function string, params []any) any {
 	value, err := h.query(contractID, function, params)
 	if err != nil {

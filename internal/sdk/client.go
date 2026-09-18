@@ -464,6 +464,16 @@ func (c *SanClient) Transfer(to string, valueSAN any, nonce *int64) (map[string]
 	return c.Send(nonce, map[string]any{"receiver": receiver, "value": valueSAN})
 }
 
+// Faucet asks the node's faucet endpoint to fund an address. amountSAN nil
+// uses the node's default faucet amount.
+func (c *SanClient) Faucet(address string, amountSAN any) (map[string]any, error) {
+	payload := map[string]any{"address": address}
+	if amountSAN != nil {
+		payload["amount"] = amountSAN
+	}
+	return c.postObject("/faucet", payload)
+}
+
 // DepositStake submits a validator deposit.
 func (c *SanClient) DepositStake(amountSAN any, nonce *int64) (map[string]any, error) {
 	units, err := ledger.SanToUnits(amountSAN)

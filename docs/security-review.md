@@ -90,15 +90,19 @@ this pass, `[documented]` means reviewed and accepted for a first devnet.
 The first-devnet residuals were re-reviewed before the public devnet on
 VPSs; each entry below states the new status.
 
-1. **TLS is opt-in, but one command now enables it.** `sanup cert`
-   (`cmd/sanup/certs.go`, `internal/tlsutil`) generates a devnet CA and a node
-   certificate (ECDSA P-256, SANs = advertise host + localhost, key 0600);
-   `sanup --tls-cert/--tls-key/--tls-ca` sets the `SAN_*` variables. A Go test
-   starts two nodes with generated certs and completes the HELLO handshake
-   over TLS (`internal/netnode/tls_test.go`). Residual: peer certificates are
-   verified but not pinned to node identities (no mTLS), and certificate
-   rotation is manual. Without `SAN_TLS_*` traffic is still plaintext and the
-   node logs a warning.
+1. **TLS is opt-in, but one command per node now enables it with a shared
+   CA.** `sanup cert --ca-only` (`cmd/sanup/certs.go`, `internal/tlsutil`)
+   creates one devnet CA; `sanup cert --ca-dir`/`SignNodeCert` signs per-node
+   certificates from it without touching `ca.crt`/`ca.key` and refuses a
+   missing/mismatched CA. ECDSA P-256, SANs = advertise host + localhost, node
+   and CA keys 0600; re-running without `--ca-dir` reuses an existing CA. Go
+   tests start two nodes with separate certificates signed by the same CA and
+   complete the HELLO handshake plus PING/PONG over TLS
+   (`internal/netnode/tls_test.go`, `internal/tlsutil/tlsutil_test.go`).
+   Residual: peer certificates are verified but not pinned to node identities
+   (no mTLS), and certificate rotation is manual. Without `SAN_TLS_*` traffic
+   is still plaintext and the node logs a warning. Distribution rules:
+   `docs/public-devnet.md` section 2.
 2. **REST API authentication is now available.** `SAN_API_TOKEN` (or
    `sanup --api-token`) requires `Authorization: Bearer <token>` on every
    route, compared with `crypto/subtle.ConstantTimeCompare`; failures use the
@@ -108,6 +112,15 @@ VPSs; each entry below states the new status.
    calls. Residual: unset by default (devnet mode) and the rate limiter is
    still the only abuse control in that case; bind the API to a private
    interface or a reverse proxy for public nodes.
+   **Faucet (new, opt-in).** `POST /faucet` is disabled unless
+   `SAN_FAUCET=1`; when enabled it validates the address, caps the amount
+   (`SAN_FAUCET_MAX`, default 100 SAN), enforces a per-address cooldown
+   (`SAN_FAUCET_COOLDOWN`, default 60 s) and a per-IP sliding-window limit,
+   requires `SAN_API_TOKEN` when configured, checks the node's own balance and
+   signs a normal transfer through the mempool (`internal/api/faucet.go`,
+   `internal/api/faucet_test.go`). Residual: the faucet spends the node's
+   liquid balance, so run it on a dedicated, deliberately funded node and keep
+   the caps tight.
 3. **LMDB still needs cgo, with an actionable error.** Requesting
    `SAN_DB_BACKEND=lmdb` in a build without the tag now fails with a message
    naming the path, `-tags lmdb` and the memory fallback
@@ -156,10 +169,12 @@ VPSs; each entry below states the new status.
 | Vet | `go vet ./...` | pass |
 | Unit tests | `go test ./... -count=1` | pass |
 | Race detector (WSL + gcc) | `go test -race -count=1 ./internal/netnode/... ./internal/api/... ./internal/sdk/... ./internal/ledger/...` | pass, no races |
-| End-to-end | `go run ./cmd/sane2e` | `5 passed, 0 failed` |
+| End-to-end | `go run ./cmd/sane2e` | `6 passed, 0 failed` (includes the faucet step) |
 | Python reference | `python -m pytest tests/test_units.py tests/test_asm.py -q` | `82 passed` |
-| TLS | `internal/netnode/tls_test.go` (generated CA/certs, HELLO + PING/PONG over TLS) | pass |
+| TLS (shared CA) | `internal/netnode/tls_test.go` (same CA signs two separate node certs, HELLO + PING/PONG over TLS) | pass |
+| CA signing | `internal/tlsutil/tlsutil_test.go`, `cmd/sanup/public_devnet_test.go`, `cmd/sanup/faucet_test.go` (stable CA, SANs, missing/mismatched CA refused) | pass |
 | REST auth | `internal/api/auth_test.go` | pass |
+| Faucet | `internal/api/faucet_test.go` (disabled default, token 401, cooldown 429, cap, verified transfer) | pass |
 | F15 leak | `internal/netnode/transport_leak_test.go` | pass |
 | Wide-area two-node | `internal/netnode/wide_area_test.go` (registry disabled, bootstrap-only join, transfer, cache restart) | pass |
 
@@ -196,10 +211,12 @@ VPSs; each entry below states the new status.
 `internal/netnode/gossip_addrman_test.go`,
 `internal/netnode/wide_area_test.go`, `internal/netnode/tls_test.go`,
 `internal/netnode/transport_leak_test.go`, `internal/tlsutil/tlsutil.go`,
-`internal/api/auth.go`, `internal/api/auth_test.go`,
-`internal/canonical/surrogate_test.go`,
+`internal/tlsutil/tlsutil_test.go`, `internal/api/auth.go`,
+`internal/api/auth_test.go`, `internal/api/faucet.go`,
+`internal/api/faucet_test.go`, `internal/canonical/surrogate_test.go`,
 `internal/ledger/store/lmdb_stub_test.go`, `cmd/sanup/certs.go`,
-`cmd/sanup/public_devnet_test.go`.
+`cmd/sanup/faucet.go`, `cmd/sanup/faucet_test.go`,
+`cmd/sanup/public_devnet_test.go`, `docs/public-devnet.md`.
 
 **Edited (Go only):** `internal/netnode/config.go`,
 `internal/netnode/discovery.go`, `internal/netnode/node.go`,
@@ -208,7 +225,8 @@ VPSs; each entry below states the new status.
 `internal/netnode/recover_test.go`, `internal/api/server.go`,
 `internal/api/run.go`, `internal/sdk/client.go`, `internal/ledger/store/lmdb_stub.go`,
 `cmd/sanup/main.go`, `cmd/sanup/genesis.go`, `cmd/sanup/state.go`,
-`cmd/sanup/status.go`, `cmd/sanup/stake.go`, `README.md`, `INSTALL.md`,
+`cmd/sanup/status.go`, `cmd/sanup/stake.go`, `cmd/sane2e/main.go`,
+`cmd/sane2e/steps.go`, `README.md`, `INSTALL.md`, `GO_MIGRATION.md`,
 `docs/gossip.md`, `docs/security-review.md`.
 
 **Not touched:** all Python implementation and reference files.
@@ -247,8 +265,46 @@ VPSs; each entry below states the new status.
 - **Evidence (WSL Ubuntu, Go 1.26.0 linux/amd64, gcc 15).** `go build ./...`,
   `go vet ./...`, `go test ./... -count=1`, `CGO_ENABLED=1 go test -tags lmdb
   ./internal/ledger/store/...` and `CGO_ENABLED=1 go build -tags lmdb ./...`
-  pass; `go run ./cmd/sane2e` reports `5 passed, 0 failed`; the wide-area
+  pass; `go run ./cmd/sane2e` reports `6 passed, 0 failed`; the wide-area
   two-node test passes with the registry disabled; `deploy/install.sh`
   installs and starts the systemd unit, `/health` answers over HTTPS with the
   API token, and `sanup --stop` stops it gracefully. Cross-compiles clean for
   linux/amd64 and linux/arm64 from Windows.
+
+---
+
+## 8. Shared-CA and faucet pass
+
+Changes since the previous pass:
+
+- **One CA for the whole devnet.** `GenerateCA(dir)` writes only
+  `ca.crt`/`ca.key`; `SignNodeCert(caDir, outDir, hosts)` loads an existing CA,
+  refuses a missing/mismatched key, and issues `node.crt`/`node.key` without
+  touching the CA. `GenerateDevnetCerts` composes both. `sanup cert` gained
+  `--ca-only` and `--ca-dir`, and reuses `<dir>/ca.crt`+`ca.key` when present
+  (no silent CA rotation) with explicit distribution output.
+- **Faucet.** Optional `POST /faucet` (see section 4 item 2), plus the
+  `sanup faucet` CLI and `--faucet`/`--faucet-amount`/`--faucet-max`/
+  `--faucet-cooldown` launcher flags, all disabled by default.
+- **Tests.** `internal/tlsutil/tlsutil_test.go` (CA stability, SANs, missing/
+  mismatched CA), shared-CA two-node TLS test in `internal/netnode/tls_test.go`
+  (separate node certs, HELLO + PING/PONG), `internal/api/faucet_test.go`
+  (disabled default, token 401, cooldown 429, cap 400, transfer verifies with
+  `ledger.VerifyTransaction` and a receiver balance check),
+  `cmd/sanup/faucet_test.go` (cert flags/reuse and CLI flag parsing), and
+  `cmd/sane2e` step 5 funds a fresh wallet through the CLI, confirms the
+  balance and re-verifies the transaction.
+- **Runbook.** `docs/public-devnet.md` covers the 10-VPS operator flow, the
+  shared CA, DNS seeds and the port/firewall table, systemd/monitoring,
+  publishing the seed list, the faucet, the joiner flow (genesis adoption,
+  NAT, mismatch handling, phase-1 plaintext trade-off) and the resulting
+  trust notes; README/INSTALL/GO_MIGRATION/gossip link it.
+- **Verified manually (WSL).** CA created once, two node certs signed from it
+  (`openssl verify` OK, `ca.crt`/`ca.key` sha256 unchanged across signings),
+  two TLS nodes started on loopback with those certs: B joined A's HTTPS
+  genesis/bootstrap and reported `peers=1` with `tls=true`; the focused test
+  logged `HELLO handshake + PING/PONG over TLS succeeded (answer=PONG)`.
+  `sanup faucet` funded a fresh wallet
+  (`tx 6246f172b8f3e23eda9ca452daaf40cf029015a4e05768fe7d836df5dbc2eedd`),
+  the balance reached 10 SAN and the transaction re-verified.
+  `go run ./cmd/sane2e` → `6 passed, 0 failed` in 72.4 s.

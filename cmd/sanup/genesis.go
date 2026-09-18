@@ -230,7 +230,11 @@ func findCacheBootstrap(publicKey string, opts options) string {
 func fetchGenesisEnv(bootstrap, token string) (map[string]string, error) {
 	base := bootstrap
 	if !strings.Contains(base, "://") {
-		base = "http://" + base
+		scheme := "http"
+		if localAPITLS {
+			scheme = "https"
+		}
+		base = scheme + "://" + base
 	}
 	client := newClient(base, nil, 5*time.Second, token)
 	payload, err := client.Genesis()
@@ -345,6 +349,18 @@ func buildChildEnv(opts options, dataDir, keyFile, publicKey string, rewardAddre
 	}
 	if opts.apiToken != "" {
 		overrides["SAN_API_TOKEN"] = opts.apiToken
+	}
+	if opts.faucet {
+		overrides["SAN_FAUCET"] = "1"
+	}
+	if value := strings.TrimSpace(opts.faucetAmount); value != "" {
+		overrides["SAN_FAUCET_AMOUNT"] = value
+	}
+	if value := strings.TrimSpace(opts.faucetMax); value != "" {
+		overrides["SAN_FAUCET_MAX"] = value
+	}
+	if value := strings.TrimSpace(opts.faucetCooldown); value != "" {
+		overrides["SAN_FAUCET_COOLDOWN"] = value
 	}
 	if seeds := strings.TrimSpace(opts.seeds); seeds != "" {
 		overrides["SAN_DNS_SEEDS"] = seeds

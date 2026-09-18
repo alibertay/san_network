@@ -284,7 +284,9 @@ the parity fixture workflow.
 The Go node is the implementation for a public devnet (the Python tree is the
 frozen reference). Discovery uses DNS seeds + explicit bootstrap addresses +
 a persisted address manager; the same-machine registry is only a fallback.
-Full walkthrough: [README](README.md#public-devnet-on-a-vps).
+Full walkthrough: [README](README.md#public-devnet-on-a-vps) and the
+[public devnet runbook](docs/public-devnet.md) (10-VPS setup, shared CA, DNS
+records, faucet, joiner troubleshooting).
 
 **Open TCP ports** (defaults): `api` 8000, `p2p` 8765, `peer` 8770,
 `controller` 8769. The three gRPC ports serve the same service, so one range
@@ -343,10 +345,17 @@ node without a seed. `--no-registry` disables the local registry.
 ### 11.3 TLS
 
 `deploy/install.sh` already generates `/etc/san/certs/{ca,node}.crt|key` and
-enables `SAN_TLS_*` in `san.env`. For manual setups:
+enables `SAN_TLS_*` in `san.env`. A public devnet shares one CA instead of one
+CA per machine: generate the CA once on the CA machine, sign every node
+certificate from it, and distribute only `node.crt`+`node.key` to that node
+and `ca.crt` to every node (`ca.key` never leaves the CA machine):
 
 ```bash
-sanup cert --dir /etc/san/certs --advertise-host node2.example.com
+# once, on the CA machine
+sanup cert --ca-only --dir /etc/san/ca
+
+# per node (CA key stays on the CA machine)
+sanup cert --ca-dir /etc/san/ca --dir /etc/san/certs --advertise-host node2.example.com
 # copy ca.crt to every machine, then add to each node:
 #   --tls-cert /etc/san/certs/node.crt --tls-key /etc/san/certs/node.key \
 #   --tls-ca /etc/san/certs/ca.crt
@@ -354,6 +363,10 @@ sanup cert --dir /etc/san/certs --advertise-host node2.example.com
 
 With TLS the REST API also speaks HTTPS; `sanup --status`/`--stop` detect
 that from the state file, and `sanup cert` writes the node/CA keys 0600.
+Re-running `sanup cert` without `--ca-dir` reuses an existing
+`ca.crt`/`ca.key` pair and only re-issues the node certificate, so the CA does
+not rotate. See
+[docs/public-devnet.md](docs/public-devnet.md#2-shared-devnet-ca).
 
 ### 11.4 Operations
 
@@ -364,6 +377,13 @@ sanup --data-dir /var/lib/san --status    # height/peers/balance (add --api-toke
 sanup --data-dir /var/lib/san --stop      # SIGTERM, wait up to 15s, then SIGKILL
 sudo bash deploy/install.sh --uninstall        # keep data; add --purge to remove it
 ```
+
+**Faucet (optional):** set `SAN_FAUCET=1` (plus `SAN_FAUCET_AMOUNT`,
+`SAN_FAUCET_MAX`, `SAN_FAUCET_COOLDOWN`) in `san.env`, or start with
+`sanup --faucet --faucet-amount 10 --faucet-max 100 --faucet-cooldown 60`.
+Then `sanup faucet --to 0x... --amount 10 [--rpc URL] [--api-token T]
+[--tls-ca CA]` (or `POST /faucet`) signs a normal transfer from the node
+identity; see [docs/public-devnet.md](docs/public-devnet.md#7-faucet).
 
 **Firewall** (ufw / nftables):
 

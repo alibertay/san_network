@@ -177,9 +177,9 @@ must be the key file address (on mismatch the launcher shows the correct
 address).
 
 `go run ./cmd/sane2e` is the test-only 3-node verification (auto-discovery,
-transfers, SANRC20, custom contract, 0→100→70 stake); it prints a PASS/FAIL
-summary and exits non-zero on failure. It is not required to run a node. See
-[GO_MIGRATION.md](GO_MIGRATION.md) for details.
+transfers, SANRC20, custom contract, 0→100→70 stake, faucet); it prints a
+PASS/FAIL summary and exits non-zero on failure. It is not required to run a
+node. See [GO_MIGRATION.md](GO_MIGRATION.md) for details.
 
 ---
 
@@ -201,6 +201,8 @@ summary and exits non-zero on failure. It is not required to run a node. See
 | `SAN_OUTBOUND_PEERS` | `8` | Outbound connection slots |
 | `SAN_API_HOST` | `SAN_HOST` | REST bind host |
 | `SAN_API_TOKEN` | – | Require `Authorization: Bearer <token>` on the REST API |
+| `SAN_FAUCET` | `0` | Enable `POST /faucet` (opt-in transfer faucet) |
+| `SAN_FAUCET_AMOUNT` / `SAN_FAUCET_MAX` / `SAN_FAUCET_COOLDOWN` | `10` / `100` / `60` | Default amount (SAN), per-request cap (SAN), per-address/IP cooldown (s) |
 | `SAN_KEY_FILE` | – | Node key file (JSON, 0600) |
 | `SAN_DB_PATH` | – | Database file (LMDB); unset = in-memory only |
 | `SAN_DB_BACKEND` | `lmdb` | `lmdb` or `memory` |
@@ -261,6 +263,7 @@ summary and exits non-zero on failure. It is not required to run a node. See
 - `GET /bootstrap` → known peers plus this node's own signed record
 - `GET /sync?from_index=N&limit=M` → one page of blocks plus a snapshot; follow `has_more` / `next_from_index`
 - `POST /transaction` → submit a signed transaction (JSON body)
+- `POST /faucet` → optional faucet (`SAN_FAUCET=1`): `{"address":"0x...","amount":10}` signs a normal transfer from the node identity
 - `POST /join` → discover peers from `SAN_BOOTSTRAP` and register
 
 ### Submitting a transaction
@@ -679,6 +682,10 @@ is the frozen reference). Peers are found with DNS seeds, explicit bootstrap
 addresses and a persisted address manager (`docs/gossip.md` section 2.6); the
 same-machine `~/.san/peers.json` registry is only a fallback.
 
+The full step-by-step operator/joiner runbook (shared CA, DNS records, ports,
+systemd, faucet, joiner troubleshooting) lives in
+**[docs/public-devnet.md](docs/public-devnet.md)**.
+
 ### Ports
 
 All TCP; open them in the firewall/security group of every public node:
@@ -736,9 +743,17 @@ entirely.
 
 ### TLS
 
+Every node on a public devnet shares one devnet CA: generate it once, then
+sign one node certificate per machine (the CA key never leaves the CA
+machine).
+
 ```bash
-# once, per node (include the public DNS name / IP in the SANs)
-go run ./cmd/sanup cert --dir /etc/san/certs --advertise-host node2.example.com
+# once, on the CA machine
+go run ./cmd/sanup cert --ca-only --dir /etc/san/ca
+
+# per node (include the public DNS name / IP in the SANs)
+go run ./cmd/sanup cert --ca-dir /etc/san/ca --dir /etc/san/certs \
+    --advertise-host node2.example.com
 
 # copy ca.crt to every machine and start each node with:
 go run ./cmd/sanup ... \
@@ -747,10 +762,13 @@ go run ./cmd/sanup ... \
     --tls-ca /etc/san/certs/ca.crt
 ```
 
-`sanup cert` writes `ca.crt`/`ca.key`, `node.crt`/`node.key` (node key 0600)
-and prints the exact trust commands. Peers without the CA fall back to the
-system trust store; without `--tls-*` all P2P traffic is plaintext (the node
-logs a warning).
+`sanup cert` writes/loads `ca.crt`/`ca.key` and issues `node.crt`/`node.key`
+(node key 0600, CA key never copied); re-running `cert` without `--ca-dir`
+reuses an existing CA instead of rotating it. Peers without the CA fall back
+to the system trust store; without `--tls-*` all P2P traffic is plaintext (the
+node logs a warning). See
+[docs/public-devnet.md](docs/public-devnet.md#2-shared-devnet-ca) for the
+distribution rules.
 
 ### Services (systemd)
 
@@ -798,6 +816,10 @@ peer cache is flushed by the node every 60 seconds instead of on exit.
   `go run ./cmd/sancli --rpc http://127.0.0.1:8000 health` and
   `go run ./cmd/sanup --data-dir /var/lib/san/node2 --status` (pass the same
   `--api-token` when one is configured).
+- Enable the optional faucet with `--faucet`/`SAN_FAUCET=1` (default off;
+  10 SAN default, 100 SAN cap, 60 s cooldown) and hand out funds with
+  `go run ./cmd/sanup faucet --to 0x... --amount 10`; see
+  [docs/public-devnet.md](docs/public-devnet.md#7-faucet).
 
 ---
 

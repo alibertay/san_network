@@ -15,12 +15,17 @@ type Server struct {
 	node    *netnode.Node
 	config  netnode.NodeConfig
 	limiter *rateLimiter
+	faucet  *faucetState
 	handler http.Handler
 }
 
 // NewServer builds the API handler with the configured rate/body limits.
 func NewServer(node *netnode.Node, config netnode.NodeConfig) *Server {
-	server := &Server{node: node, config: config}
+	server := &Server{
+		node:   node,
+		config: config,
+		faucet: newFaucetState(config.FaucetCooldown),
+	}
 	mux := http.NewServeMux()
 	server.register(mux)
 	server.limiter = newRateLimiter(config.RPCRateLimit, config.RPCRateWindow, config.RPCMaxBody)
@@ -67,6 +72,7 @@ func (s *Server) register(mux *http.ServeMux) {
 
 	mux.HandleFunc("GET /sync", s.handleSync)
 	mux.HandleFunc("POST /transaction", s.handleSubmitTransaction)
+	mux.HandleFunc("POST /faucet", s.handleFaucet)
 	mux.HandleFunc("GET /bootstrap", s.handleBootstrap)
 	mux.HandleFunc("POST /join", s.handleJoin)
 }

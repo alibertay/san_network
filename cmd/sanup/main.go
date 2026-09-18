@@ -28,6 +28,7 @@ import (
 
 const usageText = `usage: sanup [options]
        sanup cert [--dir DIR] [--advertise-host HOSTS]
+       sanup faucet --to ADDRESS [--amount SAN]
 
 One-command Go SAN devnet node (no Python at runtime).
 
@@ -53,6 +54,10 @@ options:
   --tls-ca FILE           CA bundle used to verify peers
   --api-host HOST         REST bind host (default 0.0.0.0)
   --api-token TOKEN       require Authorization: Bearer TOKEN on the REST API
+  --faucet                enable the faucet endpoint (SAN_FAUCET=1)
+  --faucet-amount SAN     default amount per request (default 10)
+  --faucet-max SAN        maximum amount per request (default 100)
+  --faucet-cooldown SEC   per-address/per-IP cooldown (default 60)
   --seed[=auto|true|false] start as founder (default auto: seed when the peer
                           registry has no reachable node, otherwise join)
   --reward-address ADDR   block reward address (default: the wallet)
@@ -77,6 +82,8 @@ examples:
   go run ./cmd/sanup cert --advertise-host vps.example.com
   go run ./cmd/sanup --host 0.0.0.0 --advertise-host vps.example.com \
       --seeds seed.example.com --stake 100
+  go run ./cmd/sanup --faucet --faucet-amount 10 --faucet-max 100
+  go run ./cmd/sanup faucet --to 0x... --amount 10
   go run ./cmd/sanup --foreground --data-dir /var/lib/san   # systemd
   go run ./cmd/sanup --status
   go run ./cmd/sanup --stop
@@ -131,6 +138,10 @@ type options struct {
 	tlsCA          string
 	apiHost        string
 	apiToken       string
+	faucet         bool
+	faucetAmount   string
+	faucetMax      string
+	faucetCooldown string
 	stop           bool
 	status         bool
 	seed           seedChoice
@@ -153,6 +164,9 @@ func run(argv []string, stdout, stderr io.Writer) int {
 	}
 	if len(argv) > 0 && argv[0] == "cert" {
 		return runCert(argv[1:], stdout, stderr)
+	}
+	if len(argv) > 0 && argv[0] == "faucet" {
+		return runFaucet(argv[1:], stdout, stderr)
 	}
 	opts, code := parseOptions(argv, stdout, stderr)
 	if code >= 0 {
@@ -217,6 +231,10 @@ func parseOptions(argv []string, stdout, stderr io.Writer) (options, int) {
 	flags.StringVar(&opts.tlsCA, "tls-ca", opts.tlsCA, "")
 	flags.StringVar(&opts.apiHost, "api-host", opts.apiHost, "")
 	flags.StringVar(&opts.apiToken, "api-token", opts.apiToken, "")
+	flags.BoolVar(&opts.faucet, "faucet", false, "")
+	flags.StringVar(&opts.faucetAmount, "faucet-amount", "", "")
+	flags.StringVar(&opts.faucetMax, "faucet-max", "", "")
+	flags.StringVar(&opts.faucetCooldown, "faucet-cooldown", "", "")
 	flags.BoolVar(&opts.stop, "stop", false, "")
 	flags.BoolVar(&opts.status, "status", false, "")
 	flags.Var(&opts.seed, "seed", "")
@@ -246,6 +264,25 @@ func parseOptions(argv []string, stdout, stderr io.Writer) (options, int) {
 	if (opts.tlsCert == "") != (opts.tlsKey == "") {
 		fmt.Fprintln(stderr, "sanup: error: --tls-cert and --tls-key must be provided together")
 		return opts, 2
+	}
+	if value := strings.TrimSpace(opts.faucetAmount); value != "" {
+		if units, err := ledger.SanToUnits(value); err != nil || units <= 0 {
+			fmt.Fprintf(stderr, "sanup: error: invalid --faucet-amount %q (want a positive SAN number)\n", value)
+			return opts, 2
+		}
+	}
+	if value := strings.TrimSpace(opts.faucetMax); value != "" {
+		if units, err := ledger.SanToUnits(value); err != nil || units <= 0 {
+			fmt.Fprintf(stderr, "sanup: error: invalid --faucet-max %q (want a positive SAN number)\n", value)
+			return opts, 2
+		}
+	}
+	if value := strings.TrimSpace(opts.faucetCooldown); value != "" {
+		parsed, err := strconv.ParseFloat(value, 64)
+		if err != nil || parsed < 0 {
+			fmt.Fprintln(stderr, "sanup: error: invalid --faucet-cooldown (want seconds >= 0)")
+			return opts, 2
+		}
 	}
 	flags.Visit(func(defined *flag.Flag) {
 		if defined.Name == "stake" {

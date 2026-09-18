@@ -94,6 +94,12 @@ type NodeConfig struct {
 	// Public API hardening.
 	APIHost  string // REST bind host; empty means Host
 	APIToken string // optional bearer token
+
+	// Faucet (enabled with SAN_FAUCET=1). Amounts are in base units.
+	FaucetEnabled  bool
+	FaucetAmount   int64
+	FaucetMax      int64
+	FaucetCooldown float64 // seconds per address and per IP
 }
 
 // DefaultNodeConfig returns the Python dataclass defaults.
@@ -142,6 +148,9 @@ func DefaultNodeConfig() NodeConfig {
 		DiscoveryProbe:     true,
 		MaxAddrEntries:     DefaultMaxAddrEntries,
 		OutboundPeers:      DefaultOutboundPeers,
+		FaucetAmount:       10 * ledger.SANBase,
+		FaucetMax:          100 * ledger.SANBase,
+		FaucetCooldown:     60.0,
 	}
 }
 
@@ -303,6 +312,10 @@ func NodeConfigFromEnv() NodeConfig {
 	}
 	config.APIHost = envStringValue("SAN_API_HOST")
 	config.APIToken = envStringValue("SAN_API_TOKEN")
+	config.FaucetEnabled = envBool("SAN_FAUCET", false)
+	config.FaucetAmount = envSANUnits("SAN_FAUCET_AMOUNT", 10.0)
+	config.FaucetMax = envSANUnits("SAN_FAUCET_MAX", 100.0)
+	config.FaucetCooldown = envFloat("SAN_FAUCET_COOLDOWN", 60.0)
 	return config
 }
 

@@ -139,19 +139,23 @@ stopping a node removes its registry entry.
 
 `go run ./cmd/sane2e` is the test-only end-to-end check (all Go): it starts
 three nodes through `sanup` (seed + two auto-discovered joiners) and verifies
-SAN transfers, a SANRC20 deploy/mint/transfer, a custom KV/counter contract
-and stake 0 → 100 → 70, then cleans every process and port up and exits
-non-zero on failure (the Python `tools/go_e2e_check.py` and
-`scripts/go_node.py` were deleted). `SAN_E2E_KEEP=1` preserves the failed
-run's data directories and node logs.
+SAN transfers, a SANRC20 deploy/mint/transfer, a custom KV/counter contract,
+stake 0 → 100 → 70 and the faucet funding a fresh wallet, then cleans every
+process and port up and exits non-zero on failure (the Python
+`tools/go_e2e_check.py` and `scripts/go_node.py` were deleted).
+`SAN_E2E_KEEP=1` preserves the failed run's data directories and node logs.
 
 Every `sanup` option also has a `SAN_*` environment equivalent
 (`SAN_HOST`, `SAN_ADVERTISE_HOST`, `SAN_DNS_SEEDS`, `SAN_BOOTSTRAP`,
-`SAN_TLS_*`, `SAN_API_TOKEN`, `SAN_DB_BACKEND`, `SAN_DB_PATH`, `SAN_SEED`,
-`SAN_STAKE`, ...), which is what `/etc/san/san.env` uses under systemd. With
-`--foreground` the launcher does not detach: it runs the node in its own
-process (systemd `Type=simple`), keeps the pid/state record and stops
+`SAN_TLS_*`, `SAN_API_TOKEN`, `SAN_FAUCET*`, `SAN_DB_BACKEND`, `SAN_DB_PATH`,
+`SAN_SEED`, `SAN_STAKE`, ...), which is what `/etc/san/san.env` uses under
+systemd. With `--foreground` the launcher does not detach: it runs the node in
+its own process (systemd `Type=simple`), keeps the pid/state record and stops
 gracefully on SIGTERM.
+
+The public-devnet operator/joiner runbook (shared CA signing, DNS seeds,
+ports/firewall, faucet, troubleshooting) is
+[docs/public-devnet.md](docs/public-devnet.md).
 
 ## Python cross-check
 
@@ -170,7 +174,11 @@ python tools/parity_fixtures.py
   `/etc/san`, generates the devnet CA/node certificate, writes
   `/etc/san/san.env` and enables `san-node.service` (`--uninstall`/`--purge`).
 - `deploy/san.env.example` — documented `SAN_*` template (host/ports,
-  advertise host, DNS seeds, TLS paths, API host/token, LMDB path, limits).
+  advertise host, DNS seeds, TLS paths, API host/token, faucet limits, LMDB
+  path, limits).
+- `docs/public-devnet.md` — operator/joiner runbook: 10-VPS setup, shared CA
+  signing, DNS seed records, ports/firewall, systemd/monitoring, publishing
+  the seed list and the faucet.
 - `deploy/san-node.service` — hardened unit running `sanup --foreground` as
   the `san` user (`SIGTERM` is the graceful stop path).
 - `deploy/Dockerfile` — multi-stage Go image with the LMDB backend
