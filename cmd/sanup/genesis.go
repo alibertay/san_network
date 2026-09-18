@@ -12,7 +12,6 @@ import (
 
 	"github.com/alibertay/san_network/internal/ledger"
 	"github.com/alibertay/san_network/internal/netnode"
-	"github.com/alibertay/san_network/internal/sdk"
 )
 
 // resolveGenesis decides whether this node is a founder or a joiner and, for
@@ -233,7 +232,7 @@ func fetchGenesisEnv(bootstrap, token string) (map[string]string, error) {
 	if !strings.Contains(base, "://") {
 		base = "http://" + base
 	}
-	client := sdk.NewSanClient(base, nil, 5*time.Second).SetToken(token)
+	client := newClient(base, nil, 5*time.Second, token)
 	payload, err := client.Genesis()
 	if err != nil {
 		return nil, fmt.Errorf("cannot fetch the seed's genesis from %s: %w", base, err)
@@ -300,8 +299,6 @@ func buildChildEnv(opts options, dataDir, keyFile, publicKey string, rewardAddre
 	}
 	overrides := map[string]string{
 		"SANUP_CHILD":             "1",
-		"SAN_DB_BACKEND":          "memory",
-		"SAN_DB_PATH":             filepath.Join(dataDir, "node.db"),
 		"SAN_HOST":                opts.host,
 		"SAN_API_HOST":            opts.apiHost,
 		"SAN_API_PORT":            strconv.Itoa(ports.API),
@@ -315,13 +312,22 @@ func buildChildEnv(opts options, dataDir, keyFile, publicKey string, rewardAddre
 		"SAN_DISCOVERY_INTERVAL":  "2",
 		"SAN_CHAIN_ID":            opts.chainID,
 	}
+	// A systemd EnvironmentFile (or a shell export) may select LMDB and a
+	// persistent database path; only fall back to the devnet memory defaults
+	// when the operator did not choose one.
+	if _, set := os.LookupEnv("SAN_DB_BACKEND"); !set {
+		overrides["SAN_DB_BACKEND"] = "memory"
+	}
+	if _, set := os.LookupEnv("SAN_DB_PATH"); !set {
+		overrides["SAN_DB_PATH"] = filepath.Join(dataDir, "node.db")
+	}
 	if advertise != "" {
 		overrides["SAN_ADVERTISE_HOST"] = advertise
 	}
 	if opts.noRegistry {
 		overrides["SAN_DISCOVERY"] = "0"
 		overrides["SAN_PEER_REGISTRY"] = ""
-	} else {
+	} else if _, set := os.LookupEnv("SAN_DISCOVERY"); !set {
 		overrides["SAN_DISCOVERY"] = "1"
 	}
 	if opts.registryPath != "" {

@@ -60,21 +60,32 @@ options:
   --host HOST             P2P bind host (default 127.0.0.1; use 0.0.0.0 public)
   --chain-id ID           chain id (default san-devnet-1)
   --timeout SECONDS       seconds to wait for health (default 90)
+  --foreground            run the node in this process instead of detaching
+                          (for systemd Type=simple; SIGTERM stops it gracefully)
   --status                show address, height, finalized height, peers,
                           balance and stake
   --stop                  stop the node started from this data directory
   --json                  print --status output as JSON
+
+Every option can also come from the SAN_* environment (SAN_HOST, SAN_API_PORT,
+SAN_ADVERTISE_HOST, SAN_DNS_SEEDS, SAN_BOOTSTRAP, SAN_TLS_CERT/KEY/CA,
+SAN_API_TOKEN, SAN_DB_BACKEND, SAN_DB_PATH, SAN_PEERS_CACHE, SAN_SEED,
+SAN_STAKE, SAN_GENESIS_AMOUNT, ...); explicit flags win.
 
 examples:
   go run ./cmd/sanup --wallet 0x... --stake 100
   go run ./cmd/sanup cert --advertise-host vps.example.com
   go run ./cmd/sanup --host 0.0.0.0 --advertise-host vps.example.com \
       --seeds seed.example.com --stake 100
+  go run ./cmd/sanup --foreground --data-dir /var/lib/san   # systemd
   go run ./cmd/sanup --status
   go run ./cmd/sanup --stop
 `
 
-type seedChoice struct{ value string }
+type seedChoice struct {
+	value    string
+	explicit bool
+}
 
 func (choice *seedChoice) String() string { return choice.value }
 
@@ -90,6 +101,11 @@ func (choice *seedChoice) Set(value string) error {
 		return fmt.Errorf("invalid --seed %q (want auto, true or false)", value)
 	}
 	return nil
+}
+
+// normalize validates the value coming from SAN_SEED.
+func (choice *seedChoice) normalize() error {
+	return choice.Set(choice.value)
 }
 
 func (choice *seedChoice) IsBoolFlag() bool { return true }
@@ -123,6 +139,7 @@ type options struct {
 	host           string
 	chainID        string
 	timeout        float64
+	foreground     bool
 	json           bool
 }
 
@@ -141,6 +158,7 @@ func run(argv []string, stdout, stderr io.Writer) int {
 	if code >= 0 {
 		return code
 	}
+	configureAPITLS(opts)
 	if opts.stop {
 		return runStop(opts, stdout, stderr)
 	}
@@ -152,38 +170,53 @@ func run(argv []string, stdout, stderr io.Writer) int {
 
 func parseOptions(argv []string, stdout, stderr io.Writer) (options, int) {
 	opts := options{
-		stake:         "",
-		dataDir:       filepath.Join("data", "go-node"),
-		genesisAmount: "10000",
-		host:          "127.0.0.1",
-		apiHost:       "0.0.0.0",
-		chainID:       "san-devnet-1",
+		stake:         envDefaultString("SAN_STAKE", ""),
+		dataDir:       envDefaultString("SAN_DATA_DIR", filepath.Join("data", "go-node")),
+		keyFile:       envDefaultString("SAN_KEY_FILE", ""),
+		genesisAmount: envDefaultString("SAN_GENESIS_AMOUNT", "10000"),
+		host:          envDefaultString("SAN_HOST", "127.0.0.1"),
+		apiHost:       envDefaultString("SAN_API_HOST", "0.0.0.0"),
+		chainID:       envDefaultString("SAN_CHAIN_ID", "san-devnet-1"),
+		seeds:         envDefaultString("SAN_DNS_SEEDS", ""),
+		bootstrap:     envDefaultString("SAN_BOOTSTRAP", ""),
+		advertiseHost: envDefaultString("SAN_ADVERTISE_HOST", ""),
+		apiToken:      envDefaultString("SAN_API_TOKEN", ""),
+		tlsCert:       envDefaultString("SAN_TLS_CERT", ""),
+		tlsKey:        envDefaultString("SAN_TLS_KEY", ""),
+		tlsCA:         envDefaultString("SAN_TLS_CA", ""),
+		peerCache:     envDefaultString("SAN_PEERS_CACHE", ""),
+		registryPath:  envDefaultString("SAN_PEER_REGISTRY", ""),
 		timeout:       90.0,
 	}
-	opts.seed.value = "auto"
+	opts.stakeProvided = opts.stake != ""
+	opts.apiPort = envDefaultInt("SAN_API_PORT", 0)
+	opts.p2pPort = envDefaultInt("SAN_P2P_PORT", 0)
+	opts.peerPort = envDefaultInt("SAN_PEER_PORT", 0)
+	opts.controllerPort = envDefaultInt("SAN_CONTROLLER_PORT", 0)
+	opts.seed.value = envDefaultString("SAN_SEED", "auto")
 
 	flags := flag.NewFlagSet("sanup", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	flags.Usage = func() { fmt.Fprint(stderr, usageText) }
 	flags.StringVar(&opts.wallet, "wallet", "", "")
-	flags.StringVar(&opts.stake, "stake", "", "")
+	flags.StringVar(&opts.stake, "stake", opts.stake, "")
 	flags.StringVar(&opts.dataDir, "data-dir", opts.dataDir, "")
-	flags.StringVar(&opts.keyFile, "key-file", "", "")
-	flags.IntVar(&opts.apiPort, "api-port", 0, "")
-	flags.IntVar(&opts.p2pPort, "p2p-port", 0, "")
-	flags.IntVar(&opts.peerPort, "peer-port", 0, "")
-	flags.IntVar(&opts.controllerPort, "controller-port", 0, "")
-	flags.StringVar(&opts.bootstrap, "bootstrap", "", "")
-	flags.StringVar(&opts.seeds, "seeds", "", "")
-	flags.StringVar(&opts.advertiseHost, "advertise-host", "", "")
-	flags.StringVar(&opts.peerCache, "peer-cache", "", "")
-	flags.StringVar(&opts.registryPath, "registry", "", "")
+	flags.StringVar(&opts.keyFile, "key-file", opts.keyFile, "")
+	flags.IntVar(&opts.apiPort, "api-port", opts.apiPort, "")
+	flags.IntVar(&opts.p2pPort, "p2p-port", opts.p2pPort, "")
+	flags.IntVar(&opts.peerPort, "peer-port", opts.peerPort, "")
+	flags.IntVar(&opts.controllerPort, "controller-port", opts.controllerPort, "")
+	flags.StringVar(&opts.bootstrap, "bootstrap", opts.bootstrap, "")
+	flags.StringVar(&opts.seeds, "seeds", opts.seeds, "")
+	flags.StringVar(&opts.advertiseHost, "advertise-host", opts.advertiseHost, "")
+	flags.StringVar(&opts.peerCache, "peer-cache", opts.peerCache, "")
+	flags.StringVar(&opts.registryPath, "registry", opts.registryPath, "")
 	flags.BoolVar(&opts.noRegistry, "no-registry", false, "")
-	flags.StringVar(&opts.tlsCert, "tls-cert", "", "")
-	flags.StringVar(&opts.tlsKey, "tls-key", "", "")
-	flags.StringVar(&opts.tlsCA, "tls-ca", "", "")
+	flags.StringVar(&opts.tlsCert, "tls-cert", opts.tlsCert, "")
+	flags.StringVar(&opts.tlsKey, "tls-key", opts.tlsKey, "")
+	flags.StringVar(&opts.tlsCA, "tls-ca", opts.tlsCA, "")
 	flags.StringVar(&opts.apiHost, "api-host", opts.apiHost, "")
-	flags.StringVar(&opts.apiToken, "api-token", "", "")
+	flags.StringVar(&opts.apiToken, "api-token", opts.apiToken, "")
 	flags.BoolVar(&opts.stop, "stop", false, "")
 	flags.BoolVar(&opts.status, "status", false, "")
 	flags.Var(&opts.seed, "seed", "")
@@ -192,6 +225,7 @@ func parseOptions(argv []string, stdout, stderr io.Writer) (options, int) {
 	flags.StringVar(&opts.host, "host", opts.host, "")
 	flags.StringVar(&opts.chainID, "chain-id", opts.chainID, "")
 	flags.Float64Var(&opts.timeout, "timeout", opts.timeout, "")
+	flags.BoolVar(&opts.foreground, "foreground", false, "")
 	flags.BoolVar(&opts.json, "json", false, "")
 
 	if err := flags.Parse(argv); err != nil {
@@ -216,9 +250,45 @@ func parseOptions(argv []string, stdout, stderr io.Writer) (options, int) {
 	flags.Visit(func(defined *flag.Flag) {
 		if defined.Name == "stake" {
 			opts.stakeProvided = true
+			return
+		}
+		if defined.Name == "seed" {
+			opts.seed.explicit = true
 		}
 	})
+	// SAN_SEED is only honoured when --seed was not passed explicitly.
+	if !opts.seed.explicit {
+		if raw := strings.TrimSpace(os.Getenv("SAN_SEED")); raw != "" {
+			opts.seed.value = raw
+		}
+	}
+	if err := opts.seed.normalize(); err != nil {
+		fmt.Fprintf(stderr, "sanup: error: %v\n", err)
+		return opts, 2
+	}
 	return opts, -1
+}
+
+// envDefaultString returns the trimmed environment value or the fallback.
+func envDefaultString(name, fallback string) string {
+	if value, ok := os.LookupEnv(name); ok {
+		if trimmed := strings.TrimSpace(value); trimmed != "" {
+			return trimmed
+		}
+	}
+	return fallback
+}
+
+func envDefaultInt(name string, fallback int) int {
+	raw := strings.TrimSpace(os.Getenv(name))
+	if raw == "" {
+		return fallback
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return fallback
+	}
+	return value
 }
 
 // runStart is the default action: start (or reuse) the node and reconcile the
@@ -275,13 +345,18 @@ func runStart(opts options, stdout, stderr io.Writer) int {
 	}
 
 	state := readState(dataDir)
+	// A previously started TLS node keeps speaking HTTPS even when --status is
+	// invoked without the --tls-* flags.
+	if state.TLS {
+		localAPITLS = true
+	}
 	host := opts.host
 	dial := connectHost(host)
 	if state.PID > 0 && processAlive(state.PID) {
 		if state.APIPort > 0 && nodeHealthyAuth(connectHost(state.Host), state.APIPort, 1500*time.Millisecond, opts.apiToken) {
 			logf(stdout, "node already running (pid %d) at http://%s:%d; reconciling stake only",
 				state.PID, connectHost(state.Host), state.APIPort)
-			client := sdk.NewSanClient(apiURL(connectHost(state.Host), state.APIPort), identity, 15*time.Second).SetToken(opts.apiToken)
+			client := newClient(apiURL(connectHost(state.Host), state.APIPort), identity, 15*time.Second, opts.apiToken)
 			if targetUnits >= 0 {
 				if err := reconcileStake(client, wallet, targetUnits, stdout, stderr); err != nil {
 					fmt.Fprintf(stderr, "[sanup] error: %v\n", err)
@@ -321,18 +396,7 @@ func runStart(opts options, stdout, stderr io.Writer) int {
 	logf(stdout, "p2p    : api=%d p2p=%d peer=%d controller=%d", ports.API, ports.P2P, ports.Peer, ports.Controller)
 	logf(stdout, "data   : %s", dataDir)
 
-	nodeExecutable, err := childExecutable(dataDir)
-	if err != nil {
-		fmt.Fprintf(stderr, "[sanup] cannot stage the node executable: %v\n", err)
-		return 1
-	}
-	pid, err := spawnChild(nodeExecutable, env, logFile)
-	if err != nil {
-		fmt.Fprintf(stderr, "[sanup] cannot start the node: %v\n", err)
-		return 1
-	}
 	newState := nodeState{
-		PID:            pid,
 		Address:        wallet,
 		PublicKey:      identity.PublicKeyHex(),
 		Host:           host,
@@ -343,38 +407,84 @@ func runStart(opts options, stdout, stderr io.Writer) int {
 		ChainID:        opts.chainID,
 		StartedAt:      nowSeconds(),
 		Seed:           seed,
+		TLS:            opts.tlsCert != "" && opts.tlsKey != "",
 		LogFile:        logFile,
 		GenesisEnv:     genesisEnv,
 	}
+	baseURL := apiURL(dial, ports.API)
+
+	// reconcileAfterStart waits for /health, applies --stake and prints the
+	// status; it is the tail of runStart for both foreground and detached
+	// children.
+	reconcileAfterStart := func(current nodeState) int {
+		if err := waitHealthy(dial, ports.API, opts.timeout, opts.apiToken); err != nil {
+			fmt.Fprintf(stderr, "[sanup] error: %v (log %s)\n", err, current.LogFile)
+			return 1
+		}
+		client := newClient(baseURL, identity, 15*time.Second, opts.apiToken)
+		if targetUnits >= 0 {
+			if err := reconcileStake(client, wallet, targetUnits, stdout, stderr); err != nil {
+				fmt.Fprintf(stderr, "[sanup] error: %v\n", err)
+				return 1
+			}
+		}
+		if code := printStatus(current, wallet, stdout, stderr, opts.json, opts.apiToken); code != 0 {
+			return code
+		}
+		if !opts.json {
+			logf(stdout, "next: sancli --rpc %s health", baseURL)
+		}
+		return 0
+	}
+
+	if opts.foreground {
+		for _, entry := range env {
+			name, value, found := strings.Cut(entry, "=")
+			if found {
+				_ = os.Setenv(name, value)
+			}
+		}
+		newState.PID = os.Getpid()
+		if err := saveState(dataDir, newState); err != nil {
+			fmt.Fprintf(stderr, "[sanup] warning: cannot record the node state: %v\n", err)
+		}
+		current := newState
+		logf(stdout, "running sannode in the foreground (pid %d)", current.PID)
+		go reconcileAfterStart(current)
+		code := runChild(stdout, stderr)
+		current.PID = 0
+		_ = saveState(dataDir, current)
+		return code
+	}
+
+	nodeExecutable, err := childExecutable(dataDir)
+	if err != nil {
+		fmt.Fprintf(stderr, "[sanup] cannot stage the node executable: %v\n", err)
+		return 1
+	}
+	pid, err := spawnChild(nodeExecutable, env, logFile)
+	if err != nil {
+		fmt.Fprintf(stderr, "[sanup] cannot start the node: %v\n", err)
+		return 1
+	}
+	newState.PID = pid
 	if err := saveState(dataDir, newState); err != nil {
 		fmt.Fprintf(stderr, "[sanup] warning: cannot record the node state: %v\n", err)
 	}
 	logf(stdout, "started sannode (pid %d, log %s)", pid, logFile)
 
-	baseURL := apiURL(dial, ports.API)
 	if err := waitHealthy(dial, ports.API, opts.timeout, opts.apiToken); err != nil {
 		fmt.Fprintf(stderr, "[sanup] error: %v; inspect %s\n", err, logFile)
 		killProcess(pid)
+		if !waitProcessExit(pid, 5*time.Second) {
+			forceKillProcess(pid)
+			_ = waitProcessExit(pid, 2*time.Second)
+		}
 		newState.PID = 0
 		_ = saveState(dataDir, newState)
 		return 1
 	}
-
-	client := sdk.NewSanClient(baseURL, identity, 15*time.Second).SetToken(opts.apiToken)
-	if targetUnits >= 0 {
-		if err := reconcileStake(client, wallet, targetUnits, stdout, stderr); err != nil {
-			fmt.Fprintf(stderr, "[sanup] error: %v\n", err)
-			return 1
-		}
-	}
-	if code := printStatus(newState, wallet, stdout, stderr, opts.json, opts.apiToken); code != 0 {
-		return code
-	}
-	if opts.json {
-		return 0
-	}
-	logf(stdout, "next: sancli --rpc %s health", baseURL)
-	return 0
+	return reconcileAfterStart(newState)
 }
 
 // resolveIdentity resolves the data dir and key file and loads (or generates)
@@ -414,8 +524,35 @@ func resolveIdentity(opts options, stdout, stderr io.Writer, allowGenerate bool)
 	return dataDir, keyFile, identity, address, -1
 }
 
+// localAPITLS mirrors the node's own TLS configuration so the launcher talks
+// to its REST API over the right scheme. It is set once per invocation from
+// --tls-cert/--tls-key (or the SAN_TLS_* environment).
+var (
+	localAPITLS bool
+	localAPICA  string
+)
+
+func configureAPITLS(opts options) {
+	localAPITLS = opts.tlsCert != "" && opts.tlsKey != ""
+	localAPICA = opts.tlsCA
+}
+
 func apiURL(host string, port int) string {
-	return "http://" + host + ":" + strconv.Itoa(port)
+	scheme := "http"
+	if localAPITLS {
+		scheme = "https"
+	}
+	return scheme + "://" + host + ":" + strconv.Itoa(port)
+}
+
+// newClient builds an SDK client for this node, trusting the devnet CA when
+// configured (or skipping verification for the node's own self-signed pair).
+func newClient(baseURL string, identity *ledger.NodeIdentity, timeout time.Duration, token string) *sdk.SanClient {
+	client := sdk.NewSanClient(baseURL, identity, timeout).SetToken(token)
+	if localAPITLS {
+		_ = client.SetTLS(localAPICA, strings.TrimSpace(localAPICA) == "")
+	}
+	return client
 }
 
 func connectHost(host string) string {

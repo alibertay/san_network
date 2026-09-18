@@ -112,9 +112,11 @@ VPSs; each entry below states the new status.
    `SAN_DB_BACKEND=lmdb` in a build without the tag now fails with a message
    naming the path, `-tags lmdb` and the memory fallback
    (`internal/ledger/store/lmdb_stub.go`, test `lmdb_stub_test.go`).
-   Production VPS builds should compile with `CGO_ENABLED=1 go build -tags
-   lmdb`; the LMDB map still grows automatically and is not disk-quota
-   limited.
+   Production VPS builds compile with `CGO_ENABLED=1 go build -tags lmdb`;
+   `deploy/install.sh` does that automatically when gcc is available and the
+   `deploy/Dockerfile` image always uses the LMDB backend (distroless,
+   non-root, `/var/lib/san` volume). The LMDB map grows automatically and is
+   not disk-quota limited.
 4. **Auto-discovery is no longer same-machine only.** DNS seeds
    (`SAN_DNS_SEEDS`), explicit bootstrap lists (`SAN_BOOTSTRAP`, comma
    separated), a persisted address manager (`SAN_PEERS_CACHE`), outbound
@@ -210,3 +212,43 @@ VPSs; each entry below states the new status.
 `docs/gossip.md`, `docs/security-review.md`.
 
 **Not touched:** all Python implementation and reference files.
+
+---
+
+## 7. Linux/VPS deployment pass
+
+- **Graceful stop.** `sanup --stop` verifies the recorded pid is really the
+  staged `sanup-node` binary (`/proc/<pid>/exe` with a `/proc/<pid>/cmdline`
+  fallback), sends `SIGTERM`, waits up to 15 s for the node's `Stop()` path
+  (peer cache saved, registry entry removed) and escalates to `SIGKILL` only
+  as a last resort. Windows keeps `taskkill /F`. Key/cache/state files are
+  written 0600 (with an explicit `Chmod`, so an existing wider file is
+  tightened) and data directories 0700.
+- **Self-peer fix.** A node that advertises a public DNS name
+  (`SAN_ADVERTISE_HOST`) no longer accepts its own signed record as a peer
+  (`isOwnRecord`), so it cannot dial itself or consume an outbound slot.
+- **Foreground/systemd mode.** `sanup --foreground` runs the node in its own
+  process for `Type=simple` units; every option is readable from `SAN_*`
+  (`SAN_SEED`, `SAN_STAKE`, `SAN_TLS_*`, ...), and the state file records TLS
+  so `--status`/`--stop` work without repeating the `--tls-*` flags.
+- **TLS REST fallbacks.** The SDK client can trust a devnet CA (or skip
+  verification for the node's own self-signed pair); `sanup` health/status and
+  the node's same-machine discovery probe use HTTPS when TLS is enabled.
+- **Lost-gossip recovery.** A node that receives a future block (a gap) or an
+  unverifiable tip-adjacent block twice now runs `Synchronize`, and the health
+  loop requests a background sync every `SAN_PEER_CHECK_INTERVAL` (30 s) when
+  peers exist. Previously a single lost `BLOCK` message left the node behind
+  until new transactions or peers appeared (the source of the WSL e2e flake;
+  `go run ./cmd/sane2e` then passed three consecutive runs).
+- **Deployment artifacts.** `deploy/install.sh`, `deploy/san.env.example`,
+  `deploy/san-node.service`, `deploy/Dockerfile`, `Makefile`; the
+  `Dockerfile.go` workaround was deleted and CI/compose use
+  `deploy/Dockerfile`.
+- **Evidence (WSL Ubuntu, Go 1.26.0 linux/amd64, gcc 15).** `go build ./...`,
+  `go vet ./...`, `go test ./... -count=1`, `CGO_ENABLED=1 go test -tags lmdb
+  ./internal/ledger/store/...` and `CGO_ENABLED=1 go build -tags lmdb ./...`
+  pass; `go run ./cmd/sane2e` reports `5 passed, 0 failed`; the wide-area
+  two-node test passes with the registry disabled; `deploy/install.sh`
+  installs and starts the systemd unit, `/health` answers over HTTPS with the
+  API token, and `sanup --stop` stops it gracefully. Cross-compiles clean for
+  linux/amd64 and linux/arm64 from Windows.

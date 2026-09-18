@@ -199,7 +199,13 @@ func (h *harness) cleanup() {
 		return true
 	})
 	if h.temp != "" {
-		_ = os.RemoveAll(h.temp)
+		// SAN_E2E_KEEP=1 preserves the node data directories and logs for
+		// debugging a failed run.
+		if os.Getenv("SAN_E2E_KEEP") == "1" {
+			logf(os.Stdout, "keeping %s (SAN_E2E_KEEP=1)", h.temp)
+		} else {
+			_ = os.RemoveAll(h.temp)
+		}
 	}
 }
 

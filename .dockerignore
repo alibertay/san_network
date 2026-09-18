@@ -12,6 +12,7 @@ data/
 *key*.json
 .pytest_cache/
 .ruff_cache/
+bin/
 .git/
 .github/
 tests/

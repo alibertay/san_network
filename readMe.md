@@ -695,9 +695,11 @@ NAT/cloud router, forward the same ports and set `--advertise-host` to the
 public DNS name or IP; peers dial the advertised ports.
 
 ```bash
-# Linux firewall example
-sudo ufw allow 8000/tcp
-sudo ufw allow 8765:8770/tcp
+# Linux firewall examples
+sudo ufw allow 8765:8770/tcp        # P2P range (required)
+sudo ufw allow 8000/tcp             # REST API only if it must be public
+# nftables equivalent
+sudo nft add rule inet filter input tcp dport 8765-8770 accept
 ```
 
 ### Seed node (new chain)
@@ -750,28 +752,34 @@ and prints the exact trust commands. Peers without the CA fall back to the
 system trust store; without `--tls-*` all P2P traffic is plaintext (the node
 logs a warning).
 
-### Services
+### Services (systemd)
 
-systemd unit (Linux; `SIGTERM` shuts the node down gracefully and flushes the
-peer cache):
+The repository ships a hardened unit (`deploy/san-node.service`), an
+environment template (`deploy/san.env.example`) and an idempotent installer:
 
-```ini
-[Unit]
-Description=SAN Network devnet node
-After=network-online.target
+```bash
+sudo bash deploy/install.sh --advertise-host node2.example.com
+# builds with the LMDB backend, installs to /usr/local/bin, creates the
+# san user, /var/lib/san (0700), /etc/san/san.env and a devnet CA/node cert,
+# then enables and starts san-node.service.
 
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/sanup --host 0.0.0.0 --api-host 0.0.0.0 \
-    --advertise-host node2.example.com --seeds seed.example.com \
-    --data-dir /var/lib/san/node2
-Restart=always
-RestartSec=5
-Environment=SAN_API_TOKEN=change-me
-
-[Install]
-WantedBy=multi-user.target
+$EDITOR /etc/san/san.env          # SAN_SEED=false, SAN_DNS_SEEDS=seed.example.com, SAN_STAKE=...
+sudo systemctl restart san-node
+systemctl status san-node
+journalctl -u san-node -f
 ```
+
+The unit runs `sanup --foreground` (`Type=simple`) as the `san` user with
+`NoNewPrivileges`, `ProtectSystem=strict` and `ReadWritePaths=/var/lib/san`;
+`SIGTERM` shuts the node down gracefully (peer cache flushed, registry entry
+removed). `sanup --stop` sends SIGTERM, waits up to 15 s and only then uses
+SIGKILL; `sanup --data-dir /var/lib/san --status` works without repeating the
+TLS flags because the state file records them. `deploy/install.sh
+--uninstall` removes the service (add `--purge` for data and config).
+
+A multi-stage `deploy/Dockerfile` (LMDB, distroless non-root) and a top-level
+`Makefile` (`make build|test|lmdb|cross|e2e|install|docker`) cover the other
+deployment paths.
 
 On Windows, run the staged node (`<data-dir>\sanup-node.exe`) as a service
 with `sc.exe create`/NSSM; `sanup --stop` uses a forced kill there, so the

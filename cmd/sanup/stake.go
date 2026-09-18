@@ -10,11 +10,11 @@ import (
 )
 
 func newHealthClient(host string, port int, timeout time.Duration, token ...string) *sdk.SanClient {
-	client := sdk.NewSanClient(apiURL(host, port), nil, timeout)
+	value := ""
 	if len(token) > 0 {
-		client.SetToken(token[0])
+		value = token[0]
 	}
-	return client
+	return newClient(apiURL(host, port), nil, timeout, value)
 }
 
 // reconcileStake drives the on-chain stake to targetUnits. Increases are a

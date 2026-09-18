@@ -134,8 +134,24 @@ func (n *Node) isSelf(peer map[string]any) bool {
 		"0.0.0.0":      true,
 		n.GetLocalIP(): true,
 	}
+	if n.config.AdvertiseHost != nil {
+		if advertised := strings.TrimSpace(*n.config.AdvertiseHost); advertised != "" {
+			localHosts[advertised] = true
+		}
+	}
 	host, _ := peer["host"].(string)
 	return localHosts[host] && int64Value(peer["api_port"]) == int64(n.config.APIPort)
+}
+
+// isOwnRecord identifies this node's own signed peer record by public key, so
+// an advertised DNS name (which never looks like a loopback address) cannot
+// sneak back in as a remote peer.
+func (n *Node) isOwnRecord(record map[string]any) bool {
+	publicKey, _ := record["public_key"].(string)
+	if publicKey == "" {
+		return false
+	}
+	return publicKey == n.identity.PublicKeyHex()
 }
 
 func (n *Node) mergePeers(peers any) int {
@@ -174,7 +190,7 @@ func (n *Node) addPeer(raw any) int {
 
 func (n *Node) addPeerFrom(raw any, source string) int {
 	record, ok := CompletePeer(raw, n.config)
-	if !ok || n.isSelf(record) {
+	if !ok || n.isSelf(record) || n.isOwnRecord(record) {
 		return 0
 	}
 	if !n.VerifyPeerRecord(record) {
@@ -380,6 +396,10 @@ func (n *Node) peerHealthLoop(ctx context.Context) {
 				// Pull the peer list so discovery converges even when the
 				// REST /bootstrap endpoint is not reachable.
 				n.requestPeers(ctx)
+				// Gossip is best-effort: without a periodic sync a single
+				// lost BLOCK message would leave this node behind while the
+				// rest of the network moves on.
+				n.requestSync(ctx)
 			}
 			n.maybeProduceFromPool()
 			n.flushPendingVotes()

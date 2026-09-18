@@ -28,16 +28,17 @@ services:
       timeout: 5s
       retries: 3
 
-  # Optional Go implementation of the node. Build the image first (the Go
-  # toolchain owns the *.go namespace, so Dockerfile.go prints the Dockerfile):
-  #   go run Dockerfile.go | docker build -f- -t san-network-go:local .
-  #   docker compose --profile go up -d san-node-go
-  # It uses the in-memory backend (no CGO in the image) and different host
-  # ports, so it can run next to the Python `node` service.
+  # Optional Go implementation of the node with the LMDB backend:
+  #   docker compose --profile go up -d --build san-node-go
+  # The image entrypoint is "sanup --foreground"; key, database and peer cache
+  # live in the san-go-data volume. Different host ports, so it can run next to
+  # the Python `node` service.
   san-node-go:
     profiles: ["go"]
+    build:
+      context: .
+      dockerfile: deploy/Dockerfile
     image: san-network-go:local
-    command: ["serve"]
     ports:
       - "18000:8000"   # REST API
       - "18765:8765"   # gRPC P2P (block gossip + sync)
@@ -45,10 +46,15 @@ services:
       - "18770:8770"   # gRPC P2P (peer discovery / gossip)
     environment:
       SAN_HOST: "0.0.0.0"
+      SAN_API_HOST: "0.0.0.0"
       SAN_ADVERTISE_HOST: "127.0.0.1"
-      SAN_DB_BACKEND: "memory"
+      SAN_DB_BACKEND: "lmdb"
+      SAN_DB_PATH: "/var/lib/san/node.db"
+      SAN_KEY_FILE: "/var/lib/san/san_key.json"
       SAN_GENESIS_ALLOCATION: "${SAN_GENESIS_ALLOCATION:-}"
       SAN_BOOTSTRAP: "${SAN_BOOTSTRAP:-}"
+    volumes:
+      - san-go-data:/var/lib/san
     healthcheck:
       test:
         - CMD
@@ -62,3 +68,4 @@ services:
 
 volumes:
   node-data:
+  san-go-data:

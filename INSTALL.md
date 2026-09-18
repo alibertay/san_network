@@ -262,17 +262,18 @@ needs a C compiler):
 CGO_ENABLED=1 go build -tags lmdb -o sannode ./cmd/sannode
 ```
 
-Docker (the Go toolchain parses every root `*.go` file, so `Dockerfile.go`
-prints the Dockerfile that is piped to `docker build`):
+Docker (multi-stage, LMDB backend, distroless non-root runtime):
 
 ```bash
-go run Dockerfile.go | docker build -f- -t san-network-go .
+docker build -f deploy/Dockerfile -t san-network-go .
+docker run -d -p 8000:8000 -p 8765:8765 -p 8769:8769 -p 8770:8770 \
+    -v san-go-data:/var/lib/san san-network-go
 ```
 
 The optional Compose service runs the built image beside the Python node:
 
 ```bash
-docker compose --profile go up -d san-node-go   # API on host port 18000
+docker compose --profile go up -d --build san-node-go   # API on host port 18000
 ```
 
 See [GO_MIGRATION.md](GO_MIGRATION.md) for the Python-to-Go package map and
@@ -287,17 +288,49 @@ Full walkthrough: [README](README.md#public-devnet-on-a-vps).
 
 **Open TCP ports** (defaults): `api` 8000, `p2p` 8765, `peer` 8770,
 `controller` 8769. The three gRPC ports serve the same service, so one range
-rule (`8765-8770`) is enough. Behind NAT/cloud security groups forward the
-same ports and advertise the public name or IP.
+rule (`8765-8770`) is enough. Keep 8000 private unless the REST API must be
+public (then always set `SAN_API_TOKEN`, ideally behind a reverse proxy).
+Behind NAT/cloud security groups forward the same ports and advertise the
+public name or IP.
+
+### 11.1 Install (systemd, one command)
+
+```bash
+git clone <repo> san_network && cd san_network
+sudo bash deploy/install.sh --advertise-host node1.example.com
+```
+
+`install.sh` builds `sannode`/`sanup`/`sancli` for the host architecture with
+the cgo LMDB backend (`-tags lmdb` when gcc is available), installs them to
+`/usr/local/bin`, creates the `san` system user and `/var/lib/san` (0700) +
+`/etc/san`, generates a devnet CA/node certificate, writes
+`/etc/san/san.env` from `deploy/san.env.example`, and installs + starts the
+`san-node.service` systemd unit. It is idempotent: re-run it to upgrade.
+Useful flags: `--prefix DIR`, `--data-dir DIR`, `--config-dir DIR`,
+`--user NAME`, `--no-cert`, `--no-systemd`, `--uninstall [--purge]`.
+
+```bash
+sudo bash deploy/install.sh --advertise-host seed.example.com   # seed / founder
+sudo bash deploy/install.sh --advertise-host node2.example.com  # joiner
+$EDITOR /etc/san/san.env     # SAN_SEED=true|false, SAN_DNS_SEEDS=..., SAN_STAKE=...
+sudo systemctl restart san-node
+```
+
+All `sanup` options are read from `SAN_*` variables, so
+`/etc/san/san.env` is the single source of truth under systemd. The unit runs
+`sanup --foreground` (`Type=simple`), so `SIGTERM` stops the node gracefully
+(peer cache flushed, registry entry removed) before systemd's stop timeout.
+
+### 11.2 Run without systemd
 
 ```bash
 # seed node (new chain)
-go run ./cmd/sanup --seed --host 0.0.0.0 --api-host 0.0.0.0 \
+sanup --seed --host 0.0.0.0 --api-host 0.0.0.0 \
     --advertise-host seed.example.com --data-dir /var/lib/san/seed
 
 # joining node (wide-area discovery; peers via the seed, genesis fetched
 # from its REST port 8000)
-go run ./cmd/sanup --host 0.0.0.0 --api-host 0.0.0.0 \
+sanup --host 0.0.0.0 --api-host 0.0.0.0 \
     --advertise-host node2.example.com --seeds seed.example.com \
     --data-dir /var/lib/san/node2
 ```
@@ -307,28 +340,46 @@ the genesis source explicitly. The address cache
 (`<data-dir>/peers-cache.json`, `--peer-cache FILE`) reconnects a restarted
 node without a seed. `--no-registry` disables the local registry.
 
-**TLS** (self-signed devnet CA, one command per node):
+### 11.3 TLS
+
+`deploy/install.sh` already generates `/etc/san/certs/{ca,node}.crt|key` and
+enables `SAN_TLS_*` in `san.env`. For manual setups:
 
 ```bash
-go run ./cmd/sanup cert --dir /etc/san/certs --advertise-host node2.example.com
+sanup cert --dir /etc/san/certs --advertise-host node2.example.com
 # copy ca.crt to every machine, then add to each node:
 #   --tls-cert /etc/san/certs/node.crt --tls-key /etc/san/certs/node.key \
 #   --tls-ca /etc/san/certs/ca.crt
 ```
 
-**REST auth:** add `--api-token TOKEN` (or `SAN_API_TOKEN`) on any node whose
-API is publicly reachable; clients then send `Authorization: Bearer TOKEN`.
+With TLS the REST API also speaks HTTPS; `sanup --status`/`--stop` detect
+that from the state file, and `sanup cert` writes the node/CA keys 0600.
 
-**Service:** run under systemd (`Restart=always`; `SIGTERM` shuts the node
-down gracefully and flushes the peer cache) or, on Windows, register the
-staged `<data-dir>\sanup-node.exe` with `sc.exe`/NSSM. `sanup --stop` is a
-forced kill on Windows, so the cache is flushed by the node every 60 s.
-
-**Persistence:** production VPS builds should use LMDB:
+### 11.4 Operations
 
 ```bash
-CGO_ENABLED=1 go build -tags lmdb -o /usr/local/bin/sanup ./cmd/sanup
+systemctl status san-node
+journalctl -u san-node -f                 # node logs (stderr)
+sanup --data-dir /var/lib/san --status    # height/peers/balance (add --api-token)
+sanup --data-dir /var/lib/san --stop      # SIGTERM, wait up to 15s, then SIGKILL
+sudo bash deploy/install.sh --uninstall        # keep data; add --purge to remove it
 ```
 
-Without the tag, `SAN_DB_BACKEND=lmdb` now fails with an actionable error
-suggesting `-tags lmdb` or `SAN_DB_BACKEND=memory`.
+**Firewall** (ufw / nftables):
+
+```bash
+sudo ufw allow 8765:8770/tcp              # P2P range
+sudo ufw allow 8000/tcp                   # REST API only if public
+# nftables equivalent
+sudo nft add rule inet filter input tcp dport 8765-8770 accept
+```
+
+**Persistence:** production VPS builds should use LMDB
+(`CGO_ENABLED=1 go build -tags lmdb`, which `install.sh` does when gcc is
+present). Without the tag, `SAN_DB_BACKEND=lmdb` fails with an actionable
+error suggesting `-tags lmdb` or `SAN_DB_BACKEND=memory`. The Docker image
+(`deploy/Dockerfile`) also builds with the LMDB backend.
+
+On Windows the launcher still uses `taskkill /F`, so the peer cache is
+flushed by the node every 60 s instead of on exit; Linux/macOS get the
+graceful SIGTERM path.

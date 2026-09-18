@@ -156,5 +156,10 @@ func writePEM(path, blockType string, der []byte, mode os.FileMode) error {
 	if data == nil {
 		return fmt.Errorf("cannot encode %s", path)
 	}
-	return os.WriteFile(path, data, mode)
+	if err := os.WriteFile(path, data, mode); err != nil {
+		return err
+	}
+	// Overwriting an existing file keeps its old permissions, so tighten them
+	// explicitly (the CA and node private keys must stay 0600).
+	return os.Chmod(path, mode)
 }

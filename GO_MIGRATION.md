@@ -17,7 +17,8 @@ cross-checking.
 3. **Interfaces** — the REST API, the Go SDK and the `sanup` / `sane2e` /
    `sannode` / `sancli` / `sangenesis` commands.
 4. **Packaging and operations** — the cgo LMDB backend (`-tags lmdb`), CI
-   jobs, the Go Docker image and this document.
+   jobs, the Go Docker image, the Linux systemd installer (`deploy/`) and this
+   document.
 
 ## Package map
 
@@ -141,7 +142,16 @@ three nodes through `sanup` (seed + two auto-discovered joiners) and verifies
 SAN transfers, a SANRC20 deploy/mint/transfer, a custom KV/counter contract
 and stake 0 → 100 → 70, then cleans every process and port up and exits
 non-zero on failure (the Python `tools/go_e2e_check.py` and
-`scripts/go_node.py` were deleted).
+`scripts/go_node.py` were deleted). `SAN_E2E_KEEP=1` preserves the failed
+run's data directories and node logs.
+
+Every `sanup` option also has a `SAN_*` environment equivalent
+(`SAN_HOST`, `SAN_ADVERTISE_HOST`, `SAN_DNS_SEEDS`, `SAN_BOOTSTRAP`,
+`SAN_TLS_*`, `SAN_API_TOKEN`, `SAN_DB_BACKEND`, `SAN_DB_PATH`, `SAN_SEED`,
+`SAN_STAKE`, ...), which is what `/etc/san/san.env` uses under systemd. With
+`--foreground` the launcher does not detach: it runs the node in its own
+process (systemd `Type=simple`), keeps the pid/state record and stops
+gracefully on SIGTERM.
 
 ## Python cross-check
 
@@ -152,17 +162,31 @@ python -m pytest tests/test_units.py tests/test_asm.py -q
 python tools/parity_fixtures.py
 ```
 
-## Docker and CI
+## Linux deployment, Docker and CI
 
-- `Dockerfile` — Python reference image (unchanged).
-- `Dockerfile.go` — executable Go definition of the Go image (distroless
-  static, in-memory backend). The Go toolchain parses every root `*.go` file,
-  so the file prints the Dockerfile instead of being one:
-  `go run Dockerfile.go | docker build -f- -t san-network-go .`.
-- `docker compose --profile go up -d san-node-go` — optional Go node beside
-  the Python one (host ports 18000 / 18765 / 18769 / 18770).
+- `deploy/install.sh` — idempotent systemd installer: builds `sannode`,
+  `sanup` and `sancli` for the host arch (LMDB when gcc is available),
+  installs to `/usr/local/bin`, creates the `san` user, `/var/lib/san` and
+  `/etc/san`, generates the devnet CA/node certificate, writes
+  `/etc/san/san.env` and enables `san-node.service` (`--uninstall`/`--purge`).
+- `deploy/san.env.example` — documented `SAN_*` template (host/ports,
+  advertise host, DNS seeds, TLS paths, API host/token, LMDB path, limits).
+- `deploy/san-node.service` — hardened unit running `sanup --foreground` as
+  the `san` user (`SIGTERM` is the graceful stop path).
+- `deploy/Dockerfile` — multi-stage Go image with the LMDB backend
+  (build-essential in the builder, distroless non-root runtime, volume
+  `/var/lib/san`): `docker build -f deploy/Dockerfile -t san-network-go .`.
+- `Makefile` — `build`, `lmdb`, `test`, `cross`, `e2e`, `run`, `stop`,
+  `install`, `docker`.
+- `docker compose --profile go up -d --build san-node-go` — optional Go node
+  beside the Python one (host ports 18000 / 18765 / 18769 / 18770).
+
+The old `Dockerfile.go` workaround (the Go toolchain parses every root `*.go`
+file, so the Dockerfile was printed from Go) is gone: the Dockerfile is now a
+normal file under `deploy/` and the build context is the repository root.
 
 CI (`.github/workflows/ci.yml`) keeps the Python lint/test/smoke jobs and adds
 `go-test` (gofmt, `go vet`, `go test ./...`) and `go-lmdb` (installs
 `build-essential`, then `CGO_ENABLED=1 go build -tags lmdb ./...` and the
-store round-trip test). The `docker` job builds both images.
+store round-trip test). The `docker` job builds the Python image and
+`deploy/Dockerfile`.

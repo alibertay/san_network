@@ -609,6 +609,14 @@ func (n *Node) handleIncomingBlock(ctx context.Context, data map[string]any) {
 	shouldSync := false
 	if accepted {
 		n.syncMisses = 0
+	} else if block.Index > tip.Index+1 {
+		// A future block means intermediate gossip messages were lost; catch
+		// up instead of waiting for the missing block to be repeated.
+		n.syncMisses++
+		if n.syncMisses >= 2 {
+			n.syncMisses = 0
+			shouldSync = true
+		}
 	} else if block.Index == tip.Index+1 && block.PreviousBlockHash == tip.CurrentBlockHash {
 		// A tip-adjacent block we could not verify: catch up instead of
 		// stalling.

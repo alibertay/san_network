@@ -11,7 +11,6 @@ import (
 
 	"github.com/alibertay/san_network/internal/ledger"
 	"github.com/alibertay/san_network/internal/netnode"
-	"github.com/alibertay/san_network/internal/sdk"
 )
 
 type statusReport struct {
@@ -34,6 +33,9 @@ type statusReport struct {
 // printStatus reports the node recorded in the data directory. It returns a
 // non-zero code only for JSON encoding failures.
 func printStatus(state nodeState, wallet string, stdout, stderr io.Writer, asJSON bool, token string) int {
+	if state.TLS {
+		localAPITLS = true
+	}
 	host := connectHost(state.Host)
 	running := state.PID > 0 && processAlive(state.PID) &&
 		nodeHealthyAuth(host, state.APIPort, 1500*time.Millisecond, token)
@@ -47,7 +49,7 @@ func printStatus(state nodeState, wallet string, stdout, stderr io.Writer, asJSO
 		report.API = apiURL(host, state.APIPort)
 	}
 	if running {
-		client := sdk.NewSanClient(report.API, nil, 5*time.Second).SetToken(token)
+		client := newClient(report.API, nil, 5*time.Second, token)
 		if health, err := client.Health(); err == nil {
 			report.Height = anyToInt64(health["height"])
 			report.FinalizedHeight = anyToInt64(health["finalized_height"])
@@ -149,18 +151,34 @@ func runStop(opts options, stdout, stderr io.Writer) int {
 	case !isNodeProcess(state.PID):
 		logf(stdout, "refusing to stop pid %d: it is not a sanup node process (stale %s?)",
 			state.PID, stateFileName)
+		return 1
 	default:
-		killProcess(state.PID)
-		for attempt := 0; attempt < 40 && processAlive(state.PID); attempt++ {
-			time.Sleep(250 * time.Millisecond)
+		pid := state.PID
+		killProcess(pid)
+		if !waitProcessExit(pid, stopGracePeriod) {
+			logf(stdout, "node pid %d did not exit within %s; sending SIGKILL", pid, stopGracePeriod)
+			forceKillProcess(pid)
+			if !waitProcessExit(pid, stopKillWait) {
+				fmt.Fprintf(stderr,
+					"[sanup] error: pid %d is still alive after SIGKILL; not touching its pid file\n", pid)
+				return 1
+			}
 		}
-		logf(stdout, "stopped the node (pid %d)", state.PID)
+		logf(stdout, "stopped the node (pid %d, peer cache flushed)", pid)
 	}
 	removeRegistryEntry(state)
 	state.PID = 0
 	_ = saveState(dataDir, state)
 	return 0
 }
+
+const (
+	// stopGracePeriod is how long SIGTERM gets to flush the peer cache and
+	// remove the registry entry before SIGKILL is sent.
+	stopGracePeriod = 15 * time.Second
+	// stopKillWait bounds the wait after SIGKILL.
+	stopKillWait = 5 * time.Second
+)
 
 // isNodeProcess reports whether pid belongs to a sanup node executable: the
 // staged child (data-dir/sanup-node[.exe]) or this launcher itself. A stale or

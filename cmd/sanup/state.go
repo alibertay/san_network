@@ -28,6 +28,7 @@ type nodeState struct {
 	ChainID        string            `json:"chain_id"`
 	StartedAt      float64           `json:"started_at"`
 	Seed           bool              `json:"seed"`
+	TLS            bool              `json:"tls,omitempty"`
 	LogFile        string            `json:"log_file"`
 	GenesisEnv     map[string]string `json:"genesis_env,omitempty"`
 }
@@ -58,7 +59,29 @@ func saveState(dataDir string, state nodeState) error {
 	if err := os.WriteFile(temp, data, 0o600); err != nil {
 		return err
 	}
-	return os.Rename(temp, statePath(dataDir))
+	if err := os.Chmod(temp, 0o600); err != nil {
+		return err
+	}
+	if err := os.Rename(temp, statePath(dataDir)); err != nil {
+		return err
+	}
+	// An existing record may have been created with wider permissions.
+	return os.Chmod(statePath(dataDir), 0o600)
+}
+
+// waitProcessExit polls until pid is gone or the timeout elapses. It returns
+// true when the process exited.
+func waitProcessExit(pid int, timeout time.Duration) bool {
+	deadline := time.Now().Add(timeout)
+	for {
+		if !processAlive(pid) {
+			return true
+		}
+		if !time.Now().Before(deadline) {
+			return false
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
 }
 
 func nowSeconds() float64 {
@@ -187,7 +210,12 @@ func childExecutable(dataDir string) (string, error) {
 	if err := os.WriteFile(temp, data, 0o755); err != nil {
 		return "", err
 	}
+	if err := os.Chmod(temp, 0o755); err != nil {
+		return "", err
+	}
 	if err := os.Rename(temp, target); err != nil {
+		// On Unix, replacing a binary that is currently executing fails with
+		// ETXTBSY; an up-to-date staged copy is fine in that case.
 		_ = os.Remove(temp)
 		if _, statErr := os.Stat(target); statErr == nil {
 			return target, nil

@@ -1282,12 +1282,32 @@ func (n *Node) GetLocalIP() string {
 }
 
 // DiscoverPeers fetches the peer list from the bootstrap node (best effort).
+// TLS-enabled nodes serve their REST API over HTTPS, so the fallback path
+// (used by the same-machine port probe and seed bootstrap) picks the matching
+// scheme and trusts the configured devnet CA.
 func (n *Node) DiscoverPeers(bootstrapNode string) []any {
 	baseURL := bootstrapNode
 	if !strings.Contains(bootstrapNode, "://") {
-		baseURL = "http://" + bootstrapNode
+		scheme := "http"
+		if n.config.TLSEnabled() {
+			scheme = "https"
+		}
+		baseURL = scheme + "://" + bootstrapNode
 	}
 	client := &http.Client{Timeout: 5 * time.Second}
+	if strings.HasPrefix(baseURL, "https://") {
+		tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: true}
+		if n.config.TLSCA != nil {
+			if pem, err := os.ReadFile(*n.config.TLSCA); err == nil {
+				pool := x509.NewCertPool()
+				if pool.AppendCertsFromPEM(pem) {
+					tlsConfig.RootCAs = pool
+					tlsConfig.InsecureSkipVerify = false
+				}
+			}
+		}
+		client.Transport = &http.Transport{TLSClientConfig: tlsConfig}
+	}
 	response, err := client.Get(strings.TrimRight(baseURL, "/") + "/bootstrap")
 	if err != nil {
 		log.Printf("Could not fetch peers from %s: %v", bootstrapNode, err)

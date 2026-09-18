@@ -6,10 +6,13 @@ package sdk
 
 import (
 	"bytes"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -68,6 +71,29 @@ func NewSanClient(baseURL string, identity *ledger.NodeIdentity, timeout ...time
 func (c *SanClient) SetToken(token string) *SanClient {
 	c.Token = strings.TrimSpace(token)
 	return c
+}
+
+// SetTLS makes the client trust caFile (a PEM bundle) for HTTPS endpoints. An
+// empty caFile uses the system trust store; insecureSkipVerify is meant for
+// the launcher talking to its own self-signed devnet node.
+func (c *SanClient) SetTLS(caFile string, insecureSkipVerify bool) error {
+	config := &tls.Config{MinVersion: tls.VersionTLS12, InsecureSkipVerify: insecureSkipVerify}
+	if strings.TrimSpace(caFile) != "" {
+		pem, err := os.ReadFile(caFile)
+		if err != nil {
+			return fmt.Errorf("cannot read TLS CA %s: %w", caFile, err)
+		}
+		pool := x509.NewCertPool()
+		if !pool.AppendCertsFromPEM(pem) {
+			return fmt.Errorf("TLS CA %s contains no usable certificate", caFile)
+		}
+		config.RootCAs = pool
+	}
+	c.httpClient = &http.Client{
+		Timeout:   c.Timeout,
+		Transport: &http.Transport{TLSClientConfig: config},
+	}
+	return nil
 }
 
 // ---------------------------------------------------------------------- #

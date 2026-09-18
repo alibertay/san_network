@@ -422,11 +422,15 @@ func (m *AddrManager) Save() error {
 	if err := os.WriteFile(temp, data, 0o600); err != nil {
 		return err
 	}
+	if err := os.Chmod(temp, 0o600); err != nil {
+		return err
+	}
 	if err := os.Rename(temp, m.path); err != nil {
 		_ = os.Remove(temp)
 		return err
 	}
-	return nil
+	// An existing cache may have been created with wider permissions.
+	return os.Chmod(m.path, 0o600)
 }
 
 // Load reads the persisted address book. Records are not re-validated against

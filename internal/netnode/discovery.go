@@ -153,11 +153,14 @@ func (r *PeerRegistry) saveLocked(contents registryContents) error {
 	if err := os.WriteFile(temp, data, 0o600); err != nil {
 		return err
 	}
+	if err := os.Chmod(temp, 0o600); err != nil {
+		return err
+	}
 	if err := os.Rename(temp, r.Path); err != nil {
 		_ = os.Remove(temp)
 		return err
 	}
-	return nil
+	return os.Chmod(r.Path, 0o600)
 }
 
 // sameRegistryOwner reports whether two records describe the same node.

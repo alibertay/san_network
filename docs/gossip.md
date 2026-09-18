@@ -648,7 +648,10 @@ retry policy is a strict extension that changes nothing on the wire.
   bounded set with a tried/new mix and per-entry backoff; it does not bucket by
   /16 (or IPv6 /32) and does not probe random addresses. This is weaker than
   Bitcoin's eclipse resistance and is a documented residual risk.
-* **Windows stop is forced.** `sanup --stop` on Windows uses `taskkill /F`,
-  so the child cannot save the cache on exit; the outbound loop flushes it
-  every 60 s instead. On Linux `SIGTERM` runs the graceful `Stop()` path and
-  saves immediately.
+* **Graceful stop on Linux/macOS.** `sanup --stop` verifies the recorded pid
+  is really the staged `sanup-node` binary (`/proc/<pid>/exe`, with a cmdline
+  fallback) before signalling, sends `SIGTERM`, waits up to 15 s for the
+  graceful `Stop()` path (peer cache saved, registry entry removed) and only
+  then escalates to `SIGKILL`. On Windows there is no SIGTERM: `--stop` uses
+  `taskkill /F`, so the child cannot save the cache on exit and the outbound
+  loop flushes it every 60 s instead.

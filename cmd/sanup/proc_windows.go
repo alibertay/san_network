@@ -52,9 +52,17 @@ func processImageName(pid int) string {
 	return strings.Trim(fields[0], "\"")
 }
 
+// killProcess terminates the process tree. Windows has no SIGTERM, so this is
+// already a forced kill; forceKillProcess is an alias kept for parity with the
+// Unix implementation.
 func killProcess(pid int) {
 	if pid <= 0 {
 		return
 	}
 	_ = exec.Command("taskkill", "/F", "/T", "/PID", strconv.Itoa(pid)).Run()
+}
+
+// forceKillProcess is the last resort after the graceful timeout.
+func forceKillProcess(pid int) {
+	killProcess(pid)
 }

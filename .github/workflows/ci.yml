@@ -91,13 +91,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
-        with:
-          go-version: "1.26"
-          cache: true
       - name: Build Python image
         run: docker build -t san-network:ci .
-      # Dockerfile.go is executable because the Go toolchain owns the *.go
-      # namespace: it prints the Dockerfile, which is fed to docker via stdin.
+      # The Go image is a normal multi-stage Dockerfile with the LMDB backend
+      # (build-essential is installed in the builder stage; the runtime is
+      # distroless and runs as nonroot).
       - name: Build Go image
-        run: go run Dockerfile.go | docker build -f- -t san-network-go:ci .
+        run: docker build -f deploy/Dockerfile -t san-network-go:ci .

@@ -1,0 +1,42 @@
+[Unit]
+Description=SAN Network devnet node (sanup)
+Documentation=https://github.com/alibertay/san_network
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+Group=@GROUP@
+WorkingDirectory=@DATA_DIR@
+EnvironmentFile=@CONFIG_DIR@/san.env
+ExecStart=@PREFIX@/bin/sanup --foreground
+
+# Graceful shutdown: SIGTERM lets the node flush its peer cache and remove its
+# registry entry before the 30 s stop timeout.
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=5
+
+# Hardening
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+RestrictNamespaces=true
+LockPersonality=true
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX AF_NETLINK
+SystemCallArchitectures=native
+CapabilityBoundingSet=
+AmbientCapabilities=
+LimitNOFILE=65536
+ReadWritePaths=@DATA_DIR@
+
+[Install]
+WantedBy=multi-user.target
