@@ -110,6 +110,8 @@ type Node struct {
 	outgoingNode    map[string]any
 	controllerNodes []map[string]any
 	seenPeerUpdates map[string]float64
+	registry        *PeerRegistry
+	syncInFlight    atomic.Bool
 
 	blockchain    *ledger.Blockchain
 	rewardAddress string
@@ -318,13 +320,19 @@ func (n *Node) Start(ctx context.Context) error {
 		cancel()
 		return err
 	}
+	if n.config.DiscoveryEnabled {
+		n.startDiscovery(runCtx)
+	}
 	n.bootstrap(runCtx)
 	n.refreshPeerSelection()
 	n.wg.Add(2)
 	go func() { defer n.wg.Done(); n.peerHealthLoop(runCtx) }()
 	go func() { defer n.wg.Done(); n.blockProductionLoop(runCtx) }()
 
-	if len(n.PEERS) > 0 {
+	n.mu.Lock()
+	peerCount := len(n.PEERS)
+	n.mu.Unlock()
+	if peerCount > 0 {
 		n.Synchronize(runCtx)
 		if n.PendingCount() == 0 {
 			n.RequestMempool(runCtx, nil)
@@ -333,7 +341,7 @@ func (n *Node) Start(ctx context.Context) error {
 
 	log.Printf("Node started (api=%d p2p=%d peer=%d controller=%d peers=%d tls=%v db=%v)",
 		n.config.APIPort, n.config.P2PPort, n.config.PeerPort, n.config.ControllerPort,
-		len(n.PEERS), n.config.TLSEnabled(), n.store != nil)
+		peerCount, n.config.TLSEnabled(), n.store != nil)
 	return nil
 }
 
@@ -345,6 +353,13 @@ func (n *Node) Stop() {
 		n.cancel = nil
 	}
 	n.wg.Wait()
+	if n.registry != nil {
+		registry := n.registry
+		n.registry = nil
+		if err := registry.Remove(n.identity.PublicKeyHex(), "", 0); err != nil {
+			log.Printf("Cannot remove the peer registry entry: %v", err)
+		}
+	}
 	for _, server := range n.servers {
 		server.Stop()
 	}

@@ -60,3 +60,18 @@ func Verify(message, signature, publicKey []byte) bool {
 	}
 	return mldsa44.Verify(&key, message, nil, signature)
 }
+
+// KeysMatch reports whether publicKey belongs to secretKey. It signs a fixed
+// message and verifies it, so a mismatched key file is rejected before the
+// node advertises a key it cannot sign for.
+func KeysMatch(secretKey, publicKey []byte) bool {
+	if len(secretKey) != SecretKeySize || len(publicKey) != PublicKeySize {
+		return false
+	}
+	message := []byte("san-identity-key-check")
+	signature, err := Sign(message, secretKey)
+	if err != nil {
+		return false
+	}
+	return Verify(message, signature, publicKey)
+}

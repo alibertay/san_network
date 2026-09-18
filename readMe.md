@@ -141,32 +141,42 @@ joiner that fetches and verifies the seed's genesis automatically use
 
 ### Start your Go node
 
-A complete Go implementation lives beside the Python one. One command builds
-`bin/sannode` / `bin/sancli`, creates the node key on first run and keeps the
-wallet's on-chain stake in sync:
+The Go implementation is fully self-contained: one Go command starts the node,
+creates the node key on first run, publishes itself in the local peer registry
+and keeps the wallet's on-chain stake in sync. No Python is involved at
+runtime.
 
 ```bash
-# start with your wallet (a fresh key file is created on first run; the script
-# prints its address, use that as --wallet from then on)
-python scripts/go_node.py --wallet 0xYourAddress
+# start as founder (or auto-join a local node already running)
+go run ./cmd/sanup --wallet 0xYourAddress
 
 # same, and reconcile the on-chain stake to exactly 100 SAN
-python scripts/go_node.py --wallet 0xYourAddress --stake 100
+go run ./cmd/sanup --wallet 0xYourAddress --stake 100
 
-python scripts/go_node.py --status
-python scripts/go_node.py --stop
+go run ./cmd/sanup --status
+go run ./cmd/sanup --stop
 ```
 
+Start one node, then run the same command again with a different `--data-dir`:
+the second node finds the first through `~/.san/peers.json` (override with
+`SAN_PEER_REGISTRY`) and joins the same chain automatically — no `--bootstrap`
+argument needed. Fallback port probing (REST 8000-8010, peer 8770-8780) also
+finds nodes started by other means. `--bootstrap host:api_port` still works
+and takes priority when provided.
+
 Defaults: data dir `data/go-node`, API/P2P/peer/controller ports
-8000/8765/8770/8769, in-memory database, unbonding 0, min stake 0, block reward
-2 SAN and a 10 000 SAN dev genesis allocation for the wallet. Pass
-`--bootstrap host:api_port` to join a seed instead of founding a chain, and
-`--genesis-alloc ADDRESS:SAN` to fund other devnet wallets. Staking is signed
-by the node key, so `--wallet` must be the key file address (on mismatch the
-script shows the correct address). `tools/go_e2e_check.py` is a test-only
-3-node verification (transfers, SANRC20, custom contract, 0→100→70 stake); it
-is not required to run a node. See [GO_MIGRATION.md](GO_MIGRATION.md) for
-details.
+8000/8765/8770/8769 (auto-incremented when busy), in-memory database,
+unbonding 0, min stake 0, block reward 2 SAN and a 10 000 SAN dev genesis
+allocation for the wallet. `--seed true|false|auto` controls founder/joiner
+mode (auto is the default), `--key-file` overrides the key path, and `--json`
+prints `--status` as JSON. Staking is signed by the node key, so `--wallet`
+must be the key file address (on mismatch the launcher shows the correct
+address).
+
+`go run ./cmd/sane2e` is the test-only 3-node verification (auto-discovery,
+transfers, SANRC20, custom contract, 0→100→70 stake); it prints a PASS/FAIL
+summary and exits non-zero on failure. It is not required to run a node. See
+[GO_MIGRATION.md](GO_MIGRATION.md) for details.
 
 ---
 
@@ -627,15 +637,17 @@ reference implementation for cross-checking; see
 [GO_MIGRATION.md](GO_MIGRATION.md) for the package map and
 [docs/chaos-limited-consensus.md](docs/chaos-limited-consensus.md) /
 [docs/gossip.md](docs/gossip.md) for the consensus and networking internals.
-For day-to-day use, `scripts/go_node.py` starts and manages the Go node (see
-[Start your Go node](#start-your-go-node) above); the raw commands are:
+For day-to-day use, `go run ./cmd/sanup ...` starts and manages the Go node
+(see [Start your Go node](#start-your-go-node) above); the raw commands are:
 
 ```bash
-go build ./...                     # sannode, sancli, sangenesis
+go build ./...                     # sanup, sane2e, sannode, sancli, sangenesis
 gofmt -l .                         # must print nothing
 go vet ./...
-go test ./... -count=1             # Go unit + parity tests
+go test ./... -count=1             # Go unit + parity + discovery tests
+go run ./cmd/sane2e                # Go end-to-end devnet check (exits non-zero on failure)
 
+go run ./cmd/sanup --wallet 0xYourAddress --stake 100
 go run ./cmd/sannode --address 0xYourRewardAddress  # = scripts/run_node.py
 SAN_DB_BACKEND=memory go run ./cmd/sannode serve    # = run.py
 go run ./cmd/sancli --rpc http://127.0.0.1:8000 health

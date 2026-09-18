@@ -404,6 +404,10 @@ func (n *Node) verifyBlock(block *ledger.Block, historical bool) bool {
 		return false
 	}
 
+	if !block.HasNumericTimestamp() {
+		log.Printf("Block %d: timestamp is not numeric", block.Index)
+		return false
+	}
 	timestamp := block.TimestampFloat()
 	median := n.blockchain.MedianTimePast(11)
 	if timestamp <= median {

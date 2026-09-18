@@ -222,7 +222,7 @@ mempool transaction:
    is the expected proposer for `(height, round)`.
 4. If the mempool is non-empty, stop unless the summed fees reach
    `block_threshold_fee` (`SAN_BLOCK_THRESHOLD_FEE`, default 500 SAN,
-   `scripts/go_node.py` lowers it to `0.0001`).
+   `cmd/sanup` lowers it to `0.0001`).
 5. Build the block, ask controllers (it is gossiped as soon as the quorum is
    reached, before the local commit), commit, vote.
 
@@ -759,7 +759,7 @@ against each other while writing this document. Differences worth knowing:
 * **Parity scope**: `tools/parity_fixtures.py` + `internal/parity` compare
   pure functions (canonical JSON, hashes, merkle/state roots, economics,
   transactions, blocks, chain replay). There is no Go-vs-Python live
-  consensus harness; `tools/go_e2e_check.py` is the Go-only end-to-end test.
+  consensus harness; `cmd/sane2e` is the Go-only end-to-end test.
 * **Controller responses**: a controller verifies with live rules
   (`VerifyBlock(block, false)` in Go, `verify_block(block)` in Python); the
   proposal message is a full block dict, so a controller needs the block's

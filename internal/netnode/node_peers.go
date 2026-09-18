@@ -306,7 +306,9 @@ func (n *Node) refreshPeerSelection() {
 
 func (n *Node) blockProductionLoop(ctx context.Context) {
 	for {
+		n.mu.Lock()
 		interval := n.blockchain.ProposerTimeout()
+		n.mu.Unlock()
 		if interval > 2.0 {
 			interval = 2.0
 		}

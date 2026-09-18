@@ -71,6 +71,13 @@ func (l *rateLimiter) wrap(next http.Handler) http.Handler {
 			}
 		}
 
+		// The Content-Length header can lie or be absent (chunked), so the
+		// read side is capped as well; without this a single request could
+		// exhaust memory.
+		if r.Body != nil {
+			r.Body = http.MaxBytesReader(w, r.Body, l.maxBody)
+		}
+
 		client := clientKey(r)
 		now := time.Now()
 

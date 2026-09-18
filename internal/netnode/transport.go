@@ -187,7 +187,7 @@ func (server *p2pServer) Session(stream grpc.BidiStreamingServer[netproto.Envelo
 	}
 
 	sessionErr := make(chan error, 1)
-	go func() { sessionErr <- server.node.PeerSession(ctx, peerStream) }()
+	go func() { sessionErr <- server.runPeerSession(ctx, peerStream) }()
 
 	sendErr := make(chan error, 1)
 	go func() {
@@ -287,6 +287,8 @@ func BuildServer(node NodeTransport, config NodeConfig) *grpc.Server {
 	options := []grpc.ServerOption{
 		grpc.MaxRecvMsgSize(config.WSMaxSize),
 		grpc.MaxSendMsgSize(config.WSMaxSize),
+		grpc.ChainUnaryInterceptor(recoverUnaryInterceptor),
+		grpc.ChainStreamInterceptor(recoverStreamInterceptor),
 	}
 	if credentials := node.TransportServerCredentials(); credentials != nil {
 		options = append(options, grpc.Creds(credentials))

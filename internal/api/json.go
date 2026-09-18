@@ -6,6 +6,7 @@ package api
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -134,6 +135,11 @@ func int64Ptr(value int64) *int64 { return &value }
 func readObjectBody(w http.ResponseWriter, r *http.Request) (map[string]any, bool) {
 	raw, err := io.ReadAll(r.Body)
 	if err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
+			return nil, false
+		}
 		writeValidationError(w, validationDetail{
 			Type:  "json_invalid",
 			Loc:   []any{"body", 0},

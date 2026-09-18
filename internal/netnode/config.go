@@ -64,6 +64,14 @@ type NodeConfig struct {
 	RPCRateLimit       int
 	RPCRateWindow      float64
 	RPCMaxBody         int
+	MaxMempool         int
+
+	// Local peer discovery through the file-backed peer registry.
+	DiscoveryEnabled  bool
+	PeerRegistryPath  string
+	DiscoveryInterval float64
+	DiscoveryTTL      float64
+	DiscoveryProbe    bool
 }
 
 // DefaultNodeConfig returns the Python dataclass defaults.
@@ -106,6 +114,10 @@ func DefaultNodeConfig() NodeConfig {
 		RPCRateLimit:       120,
 		RPCRateWindow:      10.0,
 		RPCMaxBody:         1 << 20,
+		MaxMempool:         8192,
+		DiscoveryInterval:  DefaultDiscoveryInterval,
+		DiscoveryTTL:       DefaultDiscoveryTTL,
+		DiscoveryProbe:     true,
 	}
 }
 
@@ -248,6 +260,12 @@ func NodeConfigFromEnv() NodeConfig {
 	config.RPCRateLimit = int(envInt("SAN_RPC_RATE_LIMIT", 120))
 	config.RPCRateWindow = envFloat("SAN_RPC_RATE_WINDOW", 10.0)
 	config.RPCMaxBody = int(envInt("SAN_RPC_MAX_BODY", 1<<20))
+	config.MaxMempool = int(envInt("SAN_MAX_MEMPOOL", 8192))
+	config.DiscoveryEnabled = envBool("SAN_DISCOVERY", false)
+	config.PeerRegistryPath = envStringValue("SAN_PEER_REGISTRY")
+	config.DiscoveryInterval = envFloat("SAN_DISCOVERY_INTERVAL", DefaultDiscoveryInterval)
+	config.DiscoveryTTL = envFloat("SAN_DISCOVERY_TTL", DefaultDiscoveryTTL)
+	config.DiscoveryProbe = envBool("SAN_DISCOVERY_PROBE", true)
 	return config
 }
 

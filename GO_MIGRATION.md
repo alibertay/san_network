@@ -14,8 +14,8 @@ cross-checking.
 2. **Persistence and networking** — key-value stores (memory + LMDB),
    `ChainStore` block/state persistence, the generated gRPC protocol and the
    node (peers, gossip, consensus, sync).
-3. **Interfaces** — the REST API, the Go SDK and the `sannode` / `sancli` /
-   `sangenesis` commands.
+3. **Interfaces** — the REST API, the Go SDK and the `sanup` / `sane2e` /
+   `sannode` / `sancli` / `sangenesis` commands.
 4. **Packaging and operations** — the cgo LMDB backend (`-tags lmdb`), CI
    jobs, the Go Docker image and this document.
 
@@ -39,6 +39,9 @@ cross-checking.
 | `sdk/cli.py` | `cmd/sancli` |
 | `run.py`, `scripts/run_node.py` | `cmd/sannode` |
 | `scripts/genesis_bootstrap.py` | `cmd/sangenesis` |
+| `scripts/go_node.py` (deleted) | `cmd/sanup` |
+| `tools/go_e2e_check.py` (deleted) | `cmd/sane2e` |
+| local peer discovery | `internal/netnode` (`discovery.go`, local registry `~/.san/peers.json`) |
 
 ## Documentation
 
@@ -52,9 +55,8 @@ The protocol internals are documented in `docs/`:
 
 Both documents cover the Go implementation and point out where Python
 differs. `README.md` links them from the Go section. For the day-to-day
-bring-up workflow (`scripts/go_node.py`, `tools/go_e2e_check.py`) see
-[Start your Go node (bring-up script)](#start-your-go-node-bring-up-script)
-below.
+bring-up workflow (`go run ./cmd/sanup`, `go run ./cmd/sane2e`) see
+[Start your Go node](#start-your-go-node) below.
 
 ## Parity fixtures
 
@@ -76,10 +78,11 @@ go test ./internal/parity/ -count=1
 ## Build, test and run
 
 ```bash
-go build ./...           # cmd/sannode, cmd/sancli, cmd/sangenesis
+go build ./...           # cmd/sanup, cmd/sane2e, cmd/sannode, cmd/sancli, cmd/sangenesis
 gofmt -l .               # must print nothing
 go vet ./...
-go test ./... -count=1   # unit tests + Python-generated parity fixtures
+go test ./... -count=1   # unit tests + parity fixtures + discovery integration test
+go run ./cmd/sane2e      # end-to-end devnet check (exits non-zero on failure)
 
 # LMDB backend (cgo; the bundled LMDB only needs a C compiler):
 CGO_ENABLED=1 go build -tags lmdb ./...
@@ -102,28 +105,43 @@ SAN_DB_BACKEND=memory go run ./cmd/sannode serve
 go run ./cmd/sancli --rpc http://127.0.0.1:8000 health
 ```
 
-### Start your Go node (bring-up script)
+### Start your Go node
+
+`cmd/sanup` is the all-Go single-command launcher (no Python at runtime, no
+`scripts/go_node.py`):
 
 ```bash
-python scripts/go_node.py --wallet 0xYourAddress            # start, no stake
-python scripts/go_node.py --wallet 0xYourAddress --stake 100
-python scripts/go_node.py --status
-python scripts/go_node.py --stop
+go run ./cmd/sanup --wallet 0xYourAddress            # start, no stake
+go run ./cmd/sanup --wallet 0xYourAddress --stake 100
+go run ./cmd/sanup --status
+go run ./cmd/sanup --stop
 ```
 
-The script builds `bin/sannode` / `bin/sancli` when missing or outdated,
-creates `<data-dir>/san_key.json` on first run (the wallet must match that
-key), funds the wallet at genesis and reconciles `--stake` on every start
-(deposit, or all-or-nothing undelegate + withdraw + re-stake when lowering).
-For a single-machine devnet it defaults to `SAN_DB_BACKEND=memory`,
+It creates `<data-dir>/san_key.json` on first run (the wallet must match that
+key), funds the wallet at genesis when it founds the chain, picks free ports
+when the defaults are busy, and reconciles `--stake` on every start (deposit,
+or all-or-nothing undelegate + withdraw + re-stake when lowering). For a
+single-machine devnet it defaults to `SAN_DB_BACKEND=memory`,
 `SAN_UNBONDING_PERIOD=0`, `SAN_MIN_VALIDATOR_STAKE=0` and
 `SAN_CONTROLLER_COUNT=0` (blocks are accepted locally; finality votes still
-run). Add `--bootstrap host:api_port` to join a seed.
+run).
 
-`python tools/go_e2e_check.py` is the test-only end-to-end check: it launches
-three nodes with `scripts/go_node.py` and verifies SAN transfers, a SANRC20
-deploy/mint/transfer, a custom KV/counter contract and stake 0 → 100 → 70
-with restarts, then cleans every process and port up.
+**Automatic peer discovery.** Nodes publish a signed `SelfPeerRecord` in a
+local registry (`~/.san/peers.json`, overridable with `SAN_PEER_REGISTRY`) and
+read/verify the other entries while they run. Start a second node with
+`--data-dir` and no `--bootstrap`: it finds a reachable registry node, fetches
+its genesis and joins the same chain. The discovery loop also probes the
+default local REST (8000-8010) and peer (8770-8780) port ranges so plain
+`sannode` processes are found too. `--bootstrap host:api_port` still takes
+priority, `--seed true|false|auto` overrides founder/joiner detection, and
+stopping a node removes its registry entry.
+
+`go run ./cmd/sane2e` is the test-only end-to-end check (all Go): it starts
+three nodes through `sanup` (seed + two auto-discovered joiners) and verifies
+SAN transfers, a SANRC20 deploy/mint/transfer, a custom KV/counter contract
+and stake 0 → 100 → 70, then cleans every process and port up and exits
+non-zero on failure (the Python `tools/go_e2e_check.py` and
+`scripts/go_node.py` were deleted).
 
 ## Python cross-check
 

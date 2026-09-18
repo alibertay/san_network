@@ -46,6 +46,10 @@ func NewIdentity(privateKey, publicKey []byte) (*NodeIdentity, error) {
 			"public_key must be %d bytes for the loaded backend (%s); got %d",
 			crypto.PublicKeySize, crypto.BackendName, len(publicKey))
 	}
+	if privateKey != nil && publicKey != nil && !crypto.KeysMatch(privateKey, publicKey) {
+		return nil, identityErrorf(
+			"the configured private key does not match the configured public key; refusing to start")
+	}
 	return &NodeIdentity{PrivateKey: privateKey, PublicKey: publicKey}, nil
 }
 
@@ -172,7 +176,7 @@ func (identity *NodeIdentity) Save(path string) error {
 	if absolute, err := filepath.Abs(path); err == nil {
 		directory = filepath.Dir(absolute)
 	}
-	if err := os.MkdirAll(directory, 0o755); err != nil {
+	if err := os.MkdirAll(directory, 0o700); err != nil {
 		return err
 	}
 	if err := os.WriteFile(path, data, 0o600); err != nil {

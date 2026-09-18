@@ -778,7 +778,13 @@ func Encode(instructions []Instruction) ([]any, error) {
 	position := int64(0)
 	for _, instruction := range instructions {
 		if instruction.Name == LabelRecord {
-			name := instruction.Operands[0].(string)
+			if len(instruction.Operands) == 0 {
+				return nil, asmErrorf("Label record without a name")
+			}
+			name, ok := instruction.Operands[0].(string)
+			if !ok {
+				return nil, asmErrorf("Invalid label record: %v", instruction.Operands[0])
+			}
 			if _, exists := labels[name]; exists {
 				return nil, asmErrorf("Duplicate label: %s", name)
 			}
@@ -800,8 +806,14 @@ func Encode(instructions []Instruction) ([]any, error) {
 		bytecode = append(bytecode, int(Mnemonics[instruction.Name]))
 		switch {
 		case instruction.Name == "PUSH":
+			if len(instruction.Operands) == 0 {
+				return nil, asmErrorf("PUSH without an operand")
+			}
 			bytecode = append(bytecode, instruction.Operands[0])
 		case TargetMnemonics[instruction.Name]:
+			if len(instruction.Operands) == 0 {
+				return nil, asmErrorf("%s without a target", instruction.Name)
+			}
 			target := instruction.Operands[0]
 			switch typed := target.(type) {
 			case string:

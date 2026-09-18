@@ -138,6 +138,38 @@ On startup `bootstrap` (`node_peers.go:509`) runs when `SAN_BOOTSTRAP` is set:
 `requestPeers`, so discovery converges over the session stream even when the
 REST `/bootstrap` endpoint is unreachable.
 
+### 2.5 Local peer registry (auto-discovery)
+
+Explicit bootstrap is optional: nodes running on the same machine find each
+other through a small file-backed registry (`internal/netnode/discovery.go`).
+`cmd/sanup` enables this with `SAN_DISCOVERY=1`; `sannode` can opt in with the
+same variable.
+
+- **File**: `SAN_PEER_REGISTRY` when set, otherwise `~/.san/peers.json`
+  (Windows: `%USERPROFILE%\.san\peers.json`).
+- **Entries**: the node's own signed `SelfPeerRecord` (host, ports, chain id,
+  timestamp, public key, signature) plus a `heartbeat` timestamp. Writes take
+  a `<file>.lock` and replace the file atomically, so concurrent starts cannot
+  lose entries; stale locks (10 s) are reclaimed.
+- **Freshness**: entries whose heartbeat is older than `SAN_DISCOVERY_TTL`
+  (default 600 s) are ignored and dropped on the next write. Records still
+  have to pass `VerifyPeerRecord` (chain binding, signature, `SAN_PEER_TTL`).
+- **Loop**: `startDiscovery` registers this node and merges fresh entries
+  before the initial sync; the discovery loop then re-publishes its heartbeat
+  every `SAN_DISCOVERY_INTERVAL` seconds (default 5), merges newly discovered
+  records, and calls `requestPeers` plus one bounded background `Synchronize`
+  when it added peers.
+- **Fallback probing**: every 30 s the loop also probes the default local REST
+  ports 8000-8010 (`GET /bootstrap`) and peer ports 8770-8780 (gRPC
+  `Bootstrap`), so nodes started without the registry are still found
+  (`SAN_DISCOVERY_PROBE=false` disables this).
+- **Cleanup**: `Node.Stop` removes the node's own entry; `sanup --stop`
+  removes it even after a forced kill, and otherwise the TTL expires it.
+
+Nothing in the registry is trusted: every record is verified like any other
+peer announcement, so a hostile local file can at worst advertise peers that
+fail verification or the health checks.
+
 ---
 
 ## 3. Peer health
@@ -472,6 +504,9 @@ retry policy is a strict extension that changes nothing on the wire.
 | `PEERS` reply cap | `2 * SAN_MAX_PEERS` (128 records) | `internal/netnode/node_peers.go:595` |
 | `BlockMissTTL` (BLOCK_NOT_FOUND memory) | 120 s | `internal/netnode/node.go:45` |
 | Missing-block sync throttle | one per `SAN_PEER_CHECK_INTERVAL` | `internal/netnode/node_sync.go:322` |
+| `SAN_DISCOVERY_INTERVAL` (registry loop) | 5 s | `internal/netnode/discovery.go` |
+| `SAN_DISCOVERY_TTL` (registry freshness) | 600 s | `internal/netnode/discovery.go` |
+| Local fallback probe interval | 30 s (ports 8000-8010 / 8770-8780) | `internal/netnode/discovery.go` |
 
 ---
 
@@ -520,3 +555,9 @@ retry policy is a strict extension that changes nothing on the wire.
 * **TLS trust.** Without `SAN_TLS_CA`, both implementations use the system
   trust store and log a warning; self-signed deployments must configure the
   CA and rely on the pinned authority/host override.
+* **Local discovery is Go-only.** The registry/auto-discovery loop
+  (section 2.5) has no Python counterpart; a Go node can find Python nodes via
+  bootstrap/probing, but Python nodes cannot read the registry. A live
+  two-node discovery integration test lives in
+  `internal/netnode/discovery_test.go`, and `cmd/sane2e` exercises
+  auto-discovery end to end with three nodes.

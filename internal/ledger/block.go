@@ -4,6 +4,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math"
+	"math/big"
 	"strconv"
 	"time"
 
@@ -234,7 +235,20 @@ func (block *Block) TimestampFloat() float64 {
 		return float64(value)
 	case int:
 		return float64(value)
+	case *big.Int:
+		if value != nil && value.IsInt64() {
+			return float64(value.Int64())
+		}
+		return math.NaN()
 	default:
 		return math.NaN()
 	}
+}
+
+// HasNumericTimestamp reports whether the timestamp is a real number, so the
+// consensus checks (median time, drift, minimum interval) cannot be bypassed
+// with a non-numeric or NaN timestamp.
+func (block *Block) HasNumericTimestamp() bool {
+	value := block.TimestampFloat()
+	return !math.IsNaN(value) && !math.IsInf(value, 0)
 }

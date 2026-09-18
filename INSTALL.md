@@ -240,10 +240,19 @@ node, so the configuration above applies unchanged.
 
 ```bash
 go build ./...                                          # needs Go 1.26+
+go run ./cmd/sanup --wallet 0xYourAddress --stake 100   # one-command devnet launcher (no Python)
+go run ./cmd/sanup --status                             # height, peers, balance, stake
+go run ./cmd/sanup --stop
+go run ./cmd/sane2e                                     # 3-node end-to-end check (exits non-zero on failure)
 go run ./cmd/sannode --address 0xYourRewardAddress      # = python scripts/run_node.py
 SAN_DB_BACKEND=memory go run ./cmd/sannode serve        # = python run.py
 go run ./cmd/sancli --rpc http://127.0.0.1:8000 health  # = python -m sdk.cli
 ```
+
+`sanup` nodes discover each other automatically through `~/.san/peers.json`
+(override with `SAN_PEER_REGISTRY`): start a second node in another data
+directory and it joins the first chain without `--bootstrap`. See the README
+for the flags.
 
 The default build is cgo-free and only has the in-memory backend; set
 `SAN_DB_BACKEND=memory` or build with LMDB support (the bundled LMDB only

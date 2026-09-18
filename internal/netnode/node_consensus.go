@@ -691,6 +691,16 @@ func (n *Node) isCurrentProposerLocked() bool {
 func (n *Node) validateTransactionForMempool(transaction *ledger.Transaction) error {
 	payload := transaction.Payload
 
+	// Bound the pool before admitting anything new; prune first so stale
+	// entries cannot wedge admission forever. (The Python reference has no
+	// cap; the Go node adds one as a DoS guard.)
+	if n.config.MaxMempool > 0 && len(n.transactionPool) >= n.config.MaxMempool {
+		n.prunePool()
+		if len(n.transactionPool) >= n.config.MaxMempool {
+			return fmt.Errorf("mempool is full (%d transactions)", len(n.transactionPool))
+		}
+	}
+
 	if chainID, _ := ledger.ChainIDOf(payload).(string); chainID != n.chainID {
 		return fmt.Errorf("transaction chain_id does not match this chain (%s)", n.chainID)
 	}

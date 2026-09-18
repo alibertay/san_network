@@ -21,6 +21,8 @@ func Run(ctx context.Context, node *netnode.Node, config netnode.NodeConfig) err
 		Addr:              fmt.Sprintf("%s:%d", config.Host, config.APIPort),
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
+		ReadTimeout:       30 * time.Second,
+		IdleTimeout:       120 * time.Second,
 	}
 
 	listener, err := net.Listen("tcp", server.Addr)
