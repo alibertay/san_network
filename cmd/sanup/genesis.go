@@ -33,30 +33,97 @@ func resolveGenesis(opts options, publicKey string) (bool, string, map[string]st
 		if err != nil {
 			return false, "", nil, err
 		}
-		genesisEnv, err := fetchGenesisEnv(bootstrap)
+		genesisEnv, err := fetchGenesisEnv(bootstrap, opts.apiToken)
 		if err != nil {
 			return false, "", nil, err
 		}
 		return false, bootstrap, genesisEnv, nil
 	}
-	bootstrap := findRegistryBootstrap(publicKey, opts)
+	// Default (auto): wide-area seeds first, then the persisted peer cache,
+	// then the local registry, and otherwise start as the founder. A previous
+	// join is reused from sanup.json when no seed is reachable.
+	bootstrap := ""
+	for _, candidate := range seedRESTAddresses(opts.seeds, 8000) {
+		host, port, found := strings.Cut(candidate, ":")
+		if found && nodeHealthy(connectHost(host), atoiOr(port, 0), 1500*time.Millisecond) {
+			bootstrap = candidate
+			break
+		}
+	}
 	if bootstrap == "" {
+		bootstrap = findCacheBootstrap(publicKey, opts)
+	}
+	if bootstrap == "" && !opts.noRegistry {
+		bootstrap = findRegistryBootstrap(publicKey, opts)
+	}
+	if bootstrap == "" {
+		if state := readState(opts.dataDir); len(state.GenesisEnv) > 0 {
+			return false, "", state.GenesisEnv, nil
+		}
 		return true, "", nil, nil
 	}
-	genesisEnv, err := fetchGenesisEnv(bootstrap)
+	genesisEnv, err := fetchGenesisEnv(bootstrap, opts.apiToken)
 	if err != nil {
 		return false, "", nil, err
 	}
 	return false, bootstrap, genesisEnv, nil
 }
 
+// seedRESTAddresses maps --seeds entries to REST endpoints for the genesis
+// fetch: explicit host:port entries are kept, bare hosts get the default API
+// port (8000).
+func seedRESTAddresses(seeds string, apiPort int) []string {
+	addresses := []string{}
+	for _, raw := range strings.Split(seeds, ",") {
+		candidate := normalizeBootstrap(raw)
+		if candidate == "" {
+			continue
+		}
+		if !strings.Contains(candidate, ":") {
+			candidate = candidate + ":" + strconv.Itoa(apiPort)
+		}
+		addresses = append(addresses, candidate)
+	}
+	return addresses
+}
+
+// seedPeerAddresses maps --seeds entries to P2P endpoints: bare hosts get the
+// default peer session port (8770).
+func seedPeerAddresses(seeds string, peerPort int) []string {
+	addresses := []string{}
+	for _, raw := range strings.Split(seeds, ",") {
+		candidate := normalizeBootstrap(raw)
+		if candidate == "" {
+			continue
+		}
+		if !strings.Contains(candidate, ":") {
+			candidate = candidate + ":" + strconv.Itoa(peerPort)
+		}
+		addresses = append(addresses, candidate)
+	}
+	return addresses
+}
+
 func chooseBootstrap(explicit string, opts options) (string, error) {
 	if explicit == "" {
-		bootstrap := findRegistryBootstrap("", opts)
-		if bootstrap == "" {
-			return "", fmt.Errorf("--seed false needs --bootstrap or a reachable node in the local peer registry")
+		for _, candidate := range seedRESTAddresses(opts.seeds, 8000) {
+			host, port, found := strings.Cut(candidate, ":")
+			if !found {
+				continue
+			}
+			if nodeHealthy(connectHost(host), atoiOr(port, 0), 1500*time.Millisecond) {
+				return candidate, nil
+			}
 		}
-		return bootstrap, nil
+		if bootstrap := findCacheBootstrap("", opts); bootstrap != "" {
+			return bootstrap, nil
+		}
+		if !opts.noRegistry {
+			if bootstrap := findRegistryBootstrap("", opts); bootstrap != "" {
+				return bootstrap, nil
+			}
+		}
+		return "", fmt.Errorf("--seed false needs --bootstrap, a reachable --seeds entry (directly or through the peer cache) or a reachable node in the local peer registry")
 	}
 	candidates := []string{}
 	seen := map[string]bool{}
@@ -128,12 +195,45 @@ func findRegistryBootstrap(publicKey string, opts options) string {
 	return ""
 }
 
-func fetchGenesisEnv(bootstrap string) (map[string]string, error) {
+// findCacheBootstrap returns the first reachable peer from the persisted
+// address cache (as host:api_port) so a restarted joiner can re-fetch the
+// genesis environment from the seed it learned before, without --seeds.
+func findCacheBootstrap(publicKey string, opts options) string {
+	path := strings.TrimSpace(opts.peerCache)
+	if path == "" {
+		dataDir, err := filepath.Abs(opts.dataDir)
+		if err != nil {
+			return ""
+		}
+		path = filepath.Join(dataDir, netnode.DefaultPeerCacheFile)
+	}
+	for _, record := range netnode.LoadPeerCache(path) {
+		recordKey, _ := record["public_key"].(string)
+		if publicKey != "" && recordKey == publicKey {
+			continue
+		}
+		if chainID, _ := record["chain_id"].(string); chainID != "" && chainID != opts.chainID {
+			continue
+		}
+		host := connectHost(anyToString(record["host"]))
+		port := int(anyToInt64(record["api_port"]))
+		if host == "" || port <= 0 {
+			continue
+		}
+		if !nodeHealthy(host, port, 1500*time.Millisecond) {
+			continue
+		}
+		return fmt.Sprintf("%s:%d", host, port)
+	}
+	return ""
+}
+
+func fetchGenesisEnv(bootstrap, token string) (map[string]string, error) {
 	base := bootstrap
 	if !strings.Contains(base, "://") {
 		base = "http://" + base
 	}
-	client := sdk.NewSanClient(base, nil, 5*time.Second)
+	client := sdk.NewSanClient(base, nil, 5*time.Second).SetToken(token)
 	payload, err := client.Genesis()
 	if err != nil {
 		return nil, fmt.Errorf("cannot fetch the seed's genesis from %s: %w", base, err)
@@ -194,12 +294,16 @@ func genesisEnvFromPayload(payload map[string]any) map[string]string {
 // buildChildEnv prepares the SAN_* environment for the detached node process.
 func buildChildEnv(opts options, dataDir, keyFile, publicKey string, rewardAddress string,
 	ports nodePorts, seed bool, bootstrap string, genesisEnv map[string]string) []string {
+	advertise := strings.TrimSpace(opts.advertiseHost)
+	if advertise == "" && opts.host != "0.0.0.0" && opts.host != "::" {
+		advertise = opts.host
+	}
 	overrides := map[string]string{
 		"SANUP_CHILD":             "1",
 		"SAN_DB_BACKEND":          "memory",
 		"SAN_DB_PATH":             filepath.Join(dataDir, "node.db"),
 		"SAN_HOST":                opts.host,
-		"SAN_ADVERTISE_HOST":      opts.host,
+		"SAN_API_HOST":            opts.apiHost,
 		"SAN_API_PORT":            strconv.Itoa(ports.API),
 		"SAN_P2P_PORT":            strconv.Itoa(ports.P2P),
 		"SAN_PEER_PORT":           strconv.Itoa(ports.Peer),
@@ -208,9 +312,44 @@ func buildChildEnv(opts options, dataDir, keyFile, publicKey string, rewardAddre
 		"SAN_REWARD_ADDRESS":      rewardAddress,
 		"SAN_BLOCK_THRESHOLD_FEE": "0.0001",
 		"SAN_CONTROLLER_COUNT":    "0",
-		"SAN_DISCOVERY":           "1",
 		"SAN_DISCOVERY_INTERVAL":  "2",
 		"SAN_CHAIN_ID":            opts.chainID,
+	}
+	if advertise != "" {
+		overrides["SAN_ADVERTISE_HOST"] = advertise
+	}
+	if opts.noRegistry {
+		overrides["SAN_DISCOVERY"] = "0"
+		overrides["SAN_PEER_REGISTRY"] = ""
+	} else {
+		overrides["SAN_DISCOVERY"] = "1"
+	}
+	if opts.registryPath != "" {
+		overrides["SAN_PEER_REGISTRY"] = opts.registryPath
+	}
+	if opts.peerCache != "" {
+		overrides["SAN_PEERS_CACHE"] = opts.peerCache
+	}
+	if opts.tlsCert != "" {
+		overrides["SAN_TLS_CERT"] = opts.tlsCert
+		overrides["SAN_TLS_KEY"] = opts.tlsKey
+	}
+	if opts.tlsCA != "" {
+		overrides["SAN_TLS_CA"] = opts.tlsCA
+	}
+	if opts.apiToken != "" {
+		overrides["SAN_API_TOKEN"] = opts.apiToken
+	}
+	if seeds := strings.TrimSpace(opts.seeds); seeds != "" {
+		overrides["SAN_DNS_SEEDS"] = seeds
+	}
+	bootstrapAddresses := []string{}
+	if strings.TrimSpace(bootstrap) != "" {
+		bootstrapAddresses = append(bootstrapAddresses, strings.TrimSpace(bootstrap))
+	}
+	bootstrapAddresses = append(bootstrapAddresses, seedPeerAddresses(opts.seeds, ports.Peer)...)
+	if len(bootstrapAddresses) > 0 {
+		overrides["SAN_BOOTSTRAP"] = strings.Join(bootstrapAddresses, ",")
 	}
 	if seed {
 		overrides["SAN_GENESIS_ALLOCATION"] = publicKey + ":" + opts.genesisAmount
@@ -222,7 +361,6 @@ func buildChildEnv(opts options, dataDir, keyFile, publicKey string, rewardAddre
 		for name, value := range genesisEnv {
 			overrides[name] = value
 		}
-		overrides["SAN_BOOTSTRAP"] = bootstrap
 	}
 	return envList(overrides)
 }

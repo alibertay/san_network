@@ -2,7 +2,11 @@ package netnode
 
 import (
 	"context"
+	"fmt"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/alibertay/san_network/internal/canonical"
@@ -21,8 +25,14 @@ func testConfig() NodeConfig {
 	config.BlockThresholdFee = 0
 	config.PeerCheckInterval = 3600
 	config.AdvertiseHost = stringPointer("127.0.0.1")
+	// Never touch the real ~/.san cache from tests: a unique, non-existent
+	// path keeps discovery inactive unless a test opts in.
+	config.PeerCachePath = filepath.Join(os.TempDir(),
+		fmt.Sprintf("san-test-%d-%d-peers.json", os.Getpid(), atomic.AddInt64(&testCacheCounter, 1)))
 	return config
 }
+
+var testCacheCounter int64
 
 func stringPointer(value string) *string { return &value }
 

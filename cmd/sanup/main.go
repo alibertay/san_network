@@ -5,6 +5,8 @@
 // the node's own REST API.
 //
 //	sanup --wallet 0x... --stake 100
+//	sanup --seeds seed.example.com --advertise-host vps.example.com
+//	sanup cert --advertise-host vps.example.com
 //	sanup --status
 //	sanup --stop
 package main
@@ -25,6 +27,7 @@ import (
 )
 
 const usageText = `usage: sanup [options]
+       sanup cert [--dir DIR] [--advertise-host HOSTS]
 
 One-command Go SAN devnet node (no Python at runtime).
 
@@ -39,11 +42,22 @@ options:
   --peer-port PORT        peer session port (default 8770)
   --controller-port PORT  controller port (default 8769)
   --bootstrap LIST        seed REST endpoints host:port, comma separated
+  --seeds LIST            seed hosts (DNS names and/or host:peer-port), comma
+                          separated; used for wide-area peer discovery
+  --advertise-host HOST   public IP/DNS name announced to peers
+  --peer-cache FILE       address-manager cache (default <data-dir>/peers-cache.json)
+  --registry PATH         local peer registry file (default ~/.san/peers.json)
+  --no-registry           disable the same-machine peer registry entirely
+  --tls-cert FILE         node TLS certificate (PEM)
+  --tls-key FILE          node TLS private key (PEM)
+  --tls-ca FILE           CA bundle used to verify peers
+  --api-host HOST         REST bind host (default 0.0.0.0)
+  --api-token TOKEN       require Authorization: Bearer TOKEN on the REST API
   --seed[=auto|true|false] start as founder (default auto: seed when the peer
                           registry has no reachable node, otherwise join)
   --reward-address ADDR   block reward address (default: the wallet)
   --genesis-amount SAN    founder premine for the wallet (default 10000)
-  --host HOST             bind host (default 127.0.0.1)
+  --host HOST             P2P bind host (default 127.0.0.1; use 0.0.0.0 public)
   --chain-id ID           chain id (default san-devnet-1)
   --timeout SECONDS       seconds to wait for health (default 90)
   --status                show address, height, finalized height, peers,
@@ -53,6 +67,9 @@ options:
 
 examples:
   go run ./cmd/sanup --wallet 0x... --stake 100
+  go run ./cmd/sanup cert --advertise-host vps.example.com
+  go run ./cmd/sanup --host 0.0.0.0 --advertise-host vps.example.com \
+      --seeds seed.example.com --stake 100
   go run ./cmd/sanup --status
   go run ./cmd/sanup --stop
 `
@@ -88,6 +105,16 @@ type options struct {
 	peerPort       int
 	controllerPort int
 	bootstrap      string
+	seeds          string
+	advertiseHost  string
+	peerCache      string
+	registryPath   string
+	noRegistry     bool
+	tlsCert        string
+	tlsKey         string
+	tlsCA          string
+	apiHost        string
+	apiToken       string
 	stop           bool
 	status         bool
 	seed           seedChoice
@@ -106,6 +133,9 @@ func main() {
 func run(argv []string, stdout, stderr io.Writer) int {
 	if os.Getenv("SANUP_CHILD") == "1" {
 		return runChild(stdout, stderr)
+	}
+	if len(argv) > 0 && argv[0] == "cert" {
+		return runCert(argv[1:], stdout, stderr)
 	}
 	opts, code := parseOptions(argv, stdout, stderr)
 	if code >= 0 {
@@ -126,6 +156,7 @@ func parseOptions(argv []string, stdout, stderr io.Writer) (options, int) {
 		dataDir:       filepath.Join("data", "go-node"),
 		genesisAmount: "10000",
 		host:          "127.0.0.1",
+		apiHost:       "0.0.0.0",
 		chainID:       "san-devnet-1",
 		timeout:       90.0,
 	}
@@ -143,6 +174,16 @@ func parseOptions(argv []string, stdout, stderr io.Writer) (options, int) {
 	flags.IntVar(&opts.peerPort, "peer-port", 0, "")
 	flags.IntVar(&opts.controllerPort, "controller-port", 0, "")
 	flags.StringVar(&opts.bootstrap, "bootstrap", "", "")
+	flags.StringVar(&opts.seeds, "seeds", "", "")
+	flags.StringVar(&opts.advertiseHost, "advertise-host", "", "")
+	flags.StringVar(&opts.peerCache, "peer-cache", "", "")
+	flags.StringVar(&opts.registryPath, "registry", "", "")
+	flags.BoolVar(&opts.noRegistry, "no-registry", false, "")
+	flags.StringVar(&opts.tlsCert, "tls-cert", "", "")
+	flags.StringVar(&opts.tlsKey, "tls-key", "", "")
+	flags.StringVar(&opts.tlsCA, "tls-ca", "", "")
+	flags.StringVar(&opts.apiHost, "api-host", opts.apiHost, "")
+	flags.StringVar(&opts.apiToken, "api-token", "", "")
 	flags.BoolVar(&opts.stop, "stop", false, "")
 	flags.BoolVar(&opts.status, "status", false, "")
 	flags.Var(&opts.seed, "seed", "")
@@ -162,6 +203,14 @@ func parseOptions(argv []string, stdout, stderr io.Writer) (options, int) {
 	if flags.NArg() > 0 {
 		fmt.Fprintf(stderr, "sanup: error: unexpected arguments: %s\n", strings.Join(flags.Args(), " "))
 		fmt.Fprint(stderr, usageText)
+		return opts, 2
+	}
+	if opts.noRegistry && opts.registryPath != "" {
+		fmt.Fprintln(stderr, "sanup: error: --no-registry and --registry are mutually exclusive")
+		return opts, 2
+	}
+	if (opts.tlsCert == "") != (opts.tlsKey == "") {
+		fmt.Fprintln(stderr, "sanup: error: --tls-cert and --tls-key must be provided together")
 		return opts, 2
 	}
 	flags.Visit(func(defined *flag.Flag) {
@@ -229,17 +278,17 @@ func runStart(opts options, stdout, stderr io.Writer) int {
 	host := opts.host
 	dial := connectHost(host)
 	if state.PID > 0 && processAlive(state.PID) {
-		if state.APIPort > 0 && nodeHealthy(connectHost(state.Host), state.APIPort, 1500*time.Millisecond) {
+		if state.APIPort > 0 && nodeHealthyAuth(connectHost(state.Host), state.APIPort, 1500*time.Millisecond, opts.apiToken) {
 			logf(stdout, "node already running (pid %d) at http://%s:%d; reconciling stake only",
 				state.PID, connectHost(state.Host), state.APIPort)
-			client := sdk.NewSanClient(apiURL(connectHost(state.Host), state.APIPort), identity, 15*time.Second)
+			client := sdk.NewSanClient(apiURL(connectHost(state.Host), state.APIPort), identity, 15*time.Second).SetToken(opts.apiToken)
 			if targetUnits >= 0 {
 				if err := reconcileStake(client, wallet, targetUnits, stdout, stderr); err != nil {
 					fmt.Fprintf(stderr, "[sanup] error: %v\n", err)
 					return 1
 				}
 			}
-			return printStatus(state, wallet, stdout, stderr, opts.json)
+			return printStatus(state, wallet, stdout, stderr, opts.json, opts.apiToken)
 		}
 		fmt.Fprintf(stderr,
 			"[sanup] a node process (pid %d) already exists for %s but does not answer on http://%s:%d\n"+
@@ -264,8 +313,10 @@ func runStart(opts options, stdout, stderr io.Writer) int {
 	logf(stdout, "wallet : %s", wallet)
 	if seed {
 		logf(stdout, "founder: premine %s SAN to %s", opts.genesisAmount, wallet)
+	} else if strings.TrimSpace(bootstrap) != "" {
+		logf(stdout, "joining: %s (genesis source; peers via seeds/registry)", bootstrap)
 	} else {
-		logf(stdout, "joining: %s (auto-discovered through the peer registry)", bootstrap)
+		logf(stdout, "joining: peers via wide-area discovery")
 	}
 	logf(stdout, "p2p    : api=%d p2p=%d peer=%d controller=%d", ports.API, ports.P2P, ports.Peer, ports.Controller)
 	logf(stdout, "data   : %s", dataDir)
@@ -293,6 +344,7 @@ func runStart(opts options, stdout, stderr io.Writer) int {
 		StartedAt:      nowSeconds(),
 		Seed:           seed,
 		LogFile:        logFile,
+		GenesisEnv:     genesisEnv,
 	}
 	if err := saveState(dataDir, newState); err != nil {
 		fmt.Fprintf(stderr, "[sanup] warning: cannot record the node state: %v\n", err)
@@ -300,7 +352,7 @@ func runStart(opts options, stdout, stderr io.Writer) int {
 	logf(stdout, "started sannode (pid %d, log %s)", pid, logFile)
 
 	baseURL := apiURL(dial, ports.API)
-	if err := waitHealthy(dial, ports.API, opts.timeout); err != nil {
+	if err := waitHealthy(dial, ports.API, opts.timeout, opts.apiToken); err != nil {
 		fmt.Fprintf(stderr, "[sanup] error: %v; inspect %s\n", err, logFile)
 		killProcess(pid)
 		newState.PID = 0
@@ -308,14 +360,14 @@ func runStart(opts options, stdout, stderr io.Writer) int {
 		return 1
 	}
 
-	client := sdk.NewSanClient(baseURL, identity, 15*time.Second)
+	client := sdk.NewSanClient(baseURL, identity, 15*time.Second).SetToken(opts.apiToken)
 	if targetUnits >= 0 {
 		if err := reconcileStake(client, wallet, targetUnits, stdout, stderr); err != nil {
 			fmt.Fprintf(stderr, "[sanup] error: %v\n", err)
 			return 1
 		}
 	}
-	if code := printStatus(newState, wallet, stdout, stderr, opts.json); code != 0 {
+	if code := printStatus(newState, wallet, stdout, stderr, opts.json, opts.apiToken); code != 0 {
 		return code
 	}
 	if opts.json {

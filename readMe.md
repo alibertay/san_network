@@ -162,7 +162,10 @@ the second node finds the first through `~/.san/peers.json` (override with
 `SAN_PEER_REGISTRY`) and joins the same chain automatically — no `--bootstrap`
 argument needed. Fallback port probing (REST 8000-8010, peer 8770-8780) also
 finds nodes started by other means. `--bootstrap host:api_port` still works
-and takes priority when provided.
+and takes priority when provided. For machines that are not on the same host,
+use the wide-area path (`--seeds`, `--advertise-host`, `--peer-cache`) in
+[Public Devnet on a VPS](#public-devnet-on-a-vps); the registry is a local
+fallback only and can be disabled with `--no-registry`.
 
 Defaults: data dir `data/go-node`, API/P2P/peer/controller ports
 8000/8765/8770/8769 (auto-incremented when busy), in-memory database,
@@ -191,7 +194,13 @@ summary and exits non-zero on failure. It is not required to run a node. See
 | `SAN_PEER_PORT` | `8770` | Peer discovery / gossip / PING-PONG port |
 | `SAN_CONTROLLER_PORT` | `8769` | Controller vote port |
 | `SAN_ADVERTISE_HOST` | local IP | Host announced to peers |
-| `SAN_BOOTSTRAP` | – | Seed node `host:api_port` |
+| `SAN_BOOTSTRAP` | – | Seed nodes `host:port` (comma separated) |
+| `SAN_DNS_SEEDS` | – | DNS seed hostnames / `host:port` (comma separated) |
+| `SAN_PEERS_CACHE` | `<db dir>/peers-cache.json` | Persisted address manager |
+| `SAN_MAX_ADDR_ENTRIES` | `1024` | Address manager cap |
+| `SAN_OUTBOUND_PEERS` | `8` | Outbound connection slots |
+| `SAN_API_HOST` | `SAN_HOST` | REST bind host |
+| `SAN_API_TOKEN` | – | Require `Authorization: Bearer <token>` on the REST API |
 | `SAN_KEY_FILE` | – | Node key file (JSON, 0600) |
 | `SAN_DB_PATH` | – | Database file (LMDB); unset = in-memory only |
 | `SAN_DB_BACKEND` | `lmdb` | `lmdb` or `memory` |
@@ -660,6 +669,127 @@ The default build is cgo-free and uses the in-memory backend; build with
 `SAN_DB_BACKEND=memory` explicitly. The Python tests stay available
 (`python -m pytest tests/test_units.py tests/test_asm.py -q`) to cross-check
 behavior.
+
+---
+
+## Public Devnet on a VPS
+
+The Go node is the implementation to run on a public devnet (the Python tree
+is the frozen reference). Peers are found with DNS seeds, explicit bootstrap
+addresses and a persisted address manager (`docs/gossip.md` section 2.6); the
+same-machine `~/.san/peers.json` registry is only a fallback.
+
+### Ports
+
+All TCP; open them in the firewall/security group of every public node:
+
+| Port | Default | Purpose |
+|------|---------|---------|
+| `api` | 8000 | REST API (public only if you want an open RPC) |
+| `p2p` | 8765 | block gossip, paged sync, peer status |
+| `peer` | 8770 | peer sessions, peer-list exchange |
+| `controller` | 8769 | signed block-vote requests |
+
+The three gRPC ports serve the same service, so a range rule works. Behind a
+NAT/cloud router, forward the same ports and set `--advertise-host` to the
+public DNS name or IP; peers dial the advertised ports.
+
+```bash
+# Linux firewall example
+sudo ufw allow 8000/tcp
+sudo ufw allow 8765:8770/tcp
+```
+
+### Seed node (new chain)
+
+```bash
+go run ./cmd/sanup --seed \
+    --host 0.0.0.0 --api-host 0.0.0.0 \
+    --advertise-host seed.example.com \
+    --data-dir /var/lib/san/seed
+```
+
+`--host 0.0.0.0` binds the gRPC ports, `--api-host 0.0.0.0` the REST API
+(use `--api-token` if the API must be public). Without `--host 0.0.0.0` the
+node only listens on loopback.
+
+### Joining node
+
+```bash
+go run ./cmd/sanup \
+    --host 0.0.0.0 --api-host 0.0.0.0 \
+    --advertise-host node2.example.com \
+    --seeds seed.example.com \
+    --data-dir /var/lib/san/node2
+```
+
+`--seeds` accepts DNS names or `host:port` and is used both to fetch the
+genesis (REST, default port 8000 for a bare host) and for P2P discovery
+(default peer port 8770). `--bootstrap host:api_port` pins the genesis source
+explicitly. The node persists discovered addresses in
+`<data-dir>/peers-cache.json` (`--peer-cache FILE`), so a restart reconnects
+from the cache even when the seed is temporarily unreachable. Local nodes can
+still auto-join through the registry; pass `--no-registry` to disable it
+entirely.
+
+### TLS
+
+```bash
+# once, per node (include the public DNS name / IP in the SANs)
+go run ./cmd/sanup cert --dir /etc/san/certs --advertise-host node2.example.com
+
+# copy ca.crt to every machine and start each node with:
+go run ./cmd/sanup ... \
+    --tls-cert /etc/san/certs/node.crt \
+    --tls-key /etc/san/certs/node.key \
+    --tls-ca /etc/san/certs/ca.crt
+```
+
+`sanup cert` writes `ca.crt`/`ca.key`, `node.crt`/`node.key` (node key 0600)
+and prints the exact trust commands. Peers without the CA fall back to the
+system trust store; without `--tls-*` all P2P traffic is plaintext (the node
+logs a warning).
+
+### Services
+
+systemd unit (Linux; `SIGTERM` shuts the node down gracefully and flushes the
+peer cache):
+
+```ini
+[Unit]
+Description=SAN Network devnet node
+After=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/sanup --host 0.0.0.0 --api-host 0.0.0.0 \
+    --advertise-host node2.example.com --seeds seed.example.com \
+    --data-dir /var/lib/san/node2
+Restart=always
+RestartSec=5
+Environment=SAN_API_TOKEN=change-me
+
+[Install]
+WantedBy=multi-user.target
+```
+
+On Windows, run the staged node (`<data-dir>\sanup-node.exe`) as a service
+with `sc.exe create`/NSSM; `sanup --stop` uses a forced kill there, so the
+peer cache is flushed by the node every 60 seconds instead of on exit.
+
+### General hardening
+
+- Set `--api-token`/`SAN_API_TOKEN` for a public REST endpoint and/or bind
+  `--api-host 127.0.0.1` behind a reverse proxy.
+- Build production nodes with `CGO_ENABLED=1 go build -tags lmdb` for LMDB
+  persistence (`SAN_DB_BACKEND=lmdb`); the default build only has the memory
+  backend and says so.
+- Tune discovery with `SAN_DNS_SEEDS`, `SAN_PEERS_CACHE`,
+  `SAN_OUTBOUND_PEERS` (default 8) and `SAN_MAX_ADDR_ENTRIES` (default 1024).
+- Verify a running node with:
+  `go run ./cmd/sancli --rpc http://127.0.0.1:8000 health` and
+  `go run ./cmd/sanup --data-dir /var/lib/san/node2 --status` (pass the same
+  `--api-token` when one is configured).
 
 ---
 

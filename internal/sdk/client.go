@@ -41,6 +41,9 @@ type SanClient struct {
 	BaseURL  string
 	Identity *ledger.NodeIdentity
 	Timeout  time.Duration
+	// Token is sent as "Authorization: Bearer <token>" when non-empty
+	// (SAN_API_TOKEN on the node).
+	Token string
 
 	httpClient   *http.Client
 	chainID      string
@@ -61,6 +64,12 @@ func NewSanClient(baseURL string, identity *ledger.NodeIdentity, timeout ...time
 	}
 }
 
+// SetToken configures the bearer token and returns the client for chaining.
+func (c *SanClient) SetToken(token string) *SanClient {
+	c.Token = strings.TrimSpace(token)
+	return c
+}
+
 // ---------------------------------------------------------------------- #
 // Transport
 // ---------------------------------------------------------------------- #
@@ -72,12 +81,24 @@ func (c *SanClient) client() *http.Client {
 	return c.httpClient
 }
 
+// authorize adds the bearer token to a request when configured.
+func (c *SanClient) authorize(request *http.Request) {
+	if c.Token != "" {
+		request.Header.Set("Authorization", "Bearer "+c.Token)
+	}
+}
+
 func (c *SanClient) get(path string, params url.Values) (any, error) {
 	target := c.BaseURL + path
 	if len(params) > 0 {
 		target += "?" + params.Encode()
 	}
-	response, err := c.client().Get(target)
+	request, err := http.NewRequest(http.MethodGet, target, nil)
+	if err != nil {
+		return nil, clientErrorf("GET %s failed: %v", path, err)
+	}
+	c.authorize(request)
+	response, err := c.client().Do(request)
 	if err != nil {
 		return nil, clientErrorf("GET %s failed: %v", path, err)
 	}
@@ -101,7 +122,13 @@ func (c *SanClient) post(path string, payload any) (any, error) {
 	if err != nil {
 		return nil, clientErrorf("POST %s failed: %v", path, err)
 	}
-	response, err := c.client().Post(c.BaseURL+path, "application/json", bytes.NewReader(encoded))
+	request, err := http.NewRequest(http.MethodPost, c.BaseURL+path, bytes.NewReader(encoded))
+	if err != nil {
+		return nil, clientErrorf("POST %s failed: %v", path, err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	c.authorize(request)
+	response, err := c.client().Do(request)
 	if err != nil {
 		return nil, clientErrorf("POST %s failed: %v", path, err)
 	}
@@ -281,7 +308,12 @@ func (c *SanClient) ReceiptForTx(txID string) (map[string]any, error) {
 
 // MetricsText returns the raw Prometheus exposition.
 func (c *SanClient) MetricsText() (string, error) {
-	response, err := c.client().Get(c.BaseURL + "/metrics")
+	request, err := http.NewRequest(http.MethodGet, c.BaseURL+"/metrics", nil)
+	if err != nil {
+		return "", clientErrorf("GET /metrics failed: %v", err)
+	}
+	c.authorize(request)
+	response, err := c.client().Do(request)
 	if err != nil {
 		return "", clientErrorf("GET /metrics failed: %v", err)
 	}

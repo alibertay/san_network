@@ -17,8 +17,12 @@ import (
 // enables TLS when SAN_TLS_CERT/SAN_TLS_KEY are configured.
 func Run(ctx context.Context, node *netnode.Node, config netnode.NodeConfig) error {
 	handler := NewServer(node, config)
+	host := config.APIHost
+	if host == "" {
+		host = config.Host
+	}
 	server := &http.Server{
-		Addr:              fmt.Sprintf("%s:%d", config.Host, config.APIPort),
+		Addr:              fmt.Sprintf("%s:%d", host, config.APIPort),
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
@@ -29,7 +33,8 @@ func Run(ctx context.Context, node *netnode.Node, config netnode.NodeConfig) err
 	if err != nil {
 		return err
 	}
-	log.Printf("SAN Network API listening on http://%s (tls=%v)", listener.Addr().String(), config.TLSEnabled())
+	log.Printf("SAN Network API listening on http://%s (tls=%v auth=%v)",
+		listener.Addr().String(), config.TLSEnabled(), config.APIToken != "")
 
 	errCh := make(chan error, 1)
 	go func() {

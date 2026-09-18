@@ -33,10 +33,10 @@ type statusReport struct {
 
 // printStatus reports the node recorded in the data directory. It returns a
 // non-zero code only for JSON encoding failures.
-func printStatus(state nodeState, wallet string, stdout, stderr io.Writer, asJSON bool) int {
+func printStatus(state nodeState, wallet string, stdout, stderr io.Writer, asJSON bool, token string) int {
 	host := connectHost(state.Host)
 	running := state.PID > 0 && processAlive(state.PID) &&
-		nodeHealthy(host, state.APIPort, 1500*time.Millisecond)
+		nodeHealthyAuth(host, state.APIPort, 1500*time.Millisecond, token)
 
 	report := statusReport{
 		Running: running,
@@ -47,7 +47,7 @@ func printStatus(state nodeState, wallet string, stdout, stderr io.Writer, asJSO
 		report.API = apiURL(host, state.APIPort)
 	}
 	if running {
-		client := sdk.NewSanClient(report.API, nil, 5*time.Second)
+		client := sdk.NewSanClient(report.API, nil, 5*time.Second).SetToken(token)
 		if health, err := client.Health(); err == nil {
 			report.Height = anyToInt64(health["height"])
 			report.FinalizedHeight = anyToInt64(health["finalized_height"])
@@ -133,7 +133,7 @@ func runStatus(opts options, stdout, stderr io.Writer) int {
 	if stateAddress != "" {
 		wallet = stateAddress
 	}
-	return printStatus(state, wallet, stdout, stderr, opts.json)
+	return printStatus(state, wallet, stdout, stderr, opts.json, opts.apiToken)
 }
 
 func runStop(opts options, stdout, stderr io.Writer) int {

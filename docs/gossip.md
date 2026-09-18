@@ -35,7 +35,7 @@ Contents:
 |-----|------|---------|
 | `Session` | bidirectional stream of `Envelope` | handshake, gossip, block/vote exchange, controller quorum, PING/PONG |
 | `Sync` | unary (`SyncRequest{from_index, limit}` -> `SyncResponse{payload}`) | one page of blocks plus a snapshot on the first page |
-| `Bootstrap` | unary (`Empty` -> `Envelope`) | the seed's peer list |
+| `Bootstrap` | unary (`Empty` -> `Envelope`) | the seed's peer list **plus the seed's own signed self record** (same as REST `GET /bootstrap`) |
 | `Status` | unary (`Empty` -> `Envelope`) | chain id, genesis fingerprint, height, finality |
 
 Implementation:
@@ -59,7 +59,9 @@ The REST API complements the P2P layer:
 
 * `GET /bootstrap` returns known peers **plus this node's own signed peer
   record** (`handleBootstrap`, `internal/api/server.go:399`); the gRPC
-  `Bootstrap` RPC returns only `node.Peers()` (`transport.go:268`).
+  `Bootstrap` RPC returns the same list
+  (`p2pServer.Bootstrap`, `internal/netnode/transport.go:268`), so a joining
+  node learns the seed's advertised address (needed for cache-only restarts).
 * `POST /join` reads `SAN_BOOTSTRAP`, fetches peers through the REST
   endpoint (`DiscoverPeers`) and registers (`handleJoin`,
   `internal/api/server.go:409`).
@@ -123,7 +125,9 @@ periodic re-announcements do not trigger re-gossip.
 
 ### 2.4 Discovery
 
-On startup `bootstrap` (`node_peers.go:509`) runs when `SAN_BOOTSTRAP` is set:
+On startup `bootstrap` (`node_peers.go:509`) runs for every entry of the
+comma-separated `SAN_BOOTSTRAP` list (plus the `SAN_DNS_SEEDS` entries that
+were resolved into the address manager):
 
 1. Try the gRPC `Bootstrap` RPC (`RemoteBootstrap`, 5 s timeout).
 2. If it returns nothing, fall back to the REST `GET /bootstrap`
@@ -169,6 +173,74 @@ same variable.
 Nothing in the registry is trusted: every record is verified like any other
 peer announcement, so a hostile local file can at worst advertise peers that
 fail verification or the health checks.
+
+### 2.6 Wide-area discovery (DNS seeds, addrman, outbound)
+
+The registry above only works on one machine. For a public devnet the node
+uses a Bitcoin-style address manager plus explicit seeds
+(`internal/netnode/addrman.go`, `dnsseed.go`, `outbound.go`,
+`discovery.go`). It activates when `SAN_DNS_SEEDS`, `SAN_BOOTSTRAP` or
+`SAN_DISCOVERY=1` is set, or when a persisted address cache exists.
+
+**Sources.**
+
+* `SAN_DNS_SEEDS` is a comma-separated list of seed hostnames (or
+  `host:port`). They are resolved with `net.DefaultResolver.LookupHost` at
+  startup and every 5 minutes; every A/AAAA record becomes a candidate on the
+  peer port (`SAN_PEER_PORT`).
+* `SAN_BOOTSTRAP` is a comma-separated list of `host:port` seeds. Every entry
+  is fetched at startup (gRPC `Bootstrap`, REST `/bootstrap` fallback) and
+  also stored in the address manager; a `127.0.0.1:peer_port` entry is the
+  cross-machine-style test case.
+* `PEER_UPDATE`, `PEERS` replies and inbound sessions feed the manager:
+  gossiped records must pass `VerifyPeerRecord` (source `gossip`), registry
+  records use source `registry`, and the observed IP of an inbound session is
+  stored low-trust (source `inbound`, never gossiped).
+* The manager never stores this node itself and deduplicates by
+  `host:peer_port`.
+
+**Addrman.** A bounded (`SAN_MAX_ADDR_ENTRIES`, default 1024) map of entries
+with `record`, `source`, `first_seen`, `last_seen`, `last_tried`, `failures`
+and a `tried` flag. When full, untried and least-recently-seen entries are
+evicted first. Entries idle for 30 days are dropped on load. The set is
+persisted atomically (0600) to `SAN_PEERS_CACHE`, default
+`<SAN_DB_PATH dir>/peers-cache.json` (or `~/.san/peers-cache.json`), every
+60 seconds while dirty and on a graceful `Stop()`. Persisted records are not
+re-validated against `SAN_PEER_TTL` (signatures age out); a cached address can
+only become a peer after a fresh signed handshake, so a tampered cache can at
+worst waste a dial.
+
+**Outbound slots.** `outboundLoop` (every `SAN_DISCOVERY_INTERVAL`, capped at
+5 s) keeps up to `SAN_OUTBOUND_PEERS` (default 8) outbound candidates
+connected. It selects eligible addresses, dials them with the TLS-aware
+transport, asks for their peer list (gRPC `Bootstrap`; a plain
+`OpenSession` + `GET_PEERS` + `PEER_UPDATE` fallback), then calls
+`requestPeers` and one bounded `requestSync`. Failures set an exponential
+backoff (`5 s * 2^failures`, capped at 15 min); after 5 consecutive failures
+the address is evicted from the manager and from `PEERS`.
+
+**Address gossip.** The existing `GET_PEERS`/`PEERS` and `PEER_UPDATE`
+messages are the gossip layer: `handlePeersMessage` merges every verified
+record, stores it in the manager and refreshes the selection; the health loop
+periodically re-announces this node's signed record. No new wire message was
+added, so Python nodes remain compatible.
+
+**DNS/DoS considerations.** DNS seeds are a centralization point: an operator
+running their own resolver can censor or eclipse a node, so `SAN_BOOTSTRAP`
+(and the cached address book) is always kept as a fallback, the seed hostnames
+come from the operator's own configuration, and a seed cannot replace
+signature verification. The manager bounds memory, truncates `PEERS` replies
+to `2 * SAN_MAX_PEERS`, rate-limits sessions and applies the reconnect backoff
+above, so a hostile seed can only advertise unreachable or unverifiable
+addresses. The local registry is only a fallback when no wide-area sources are
+configured; the loopback port probe (8000-8010 / 8770-8780) runs only in that
+same case and never leaves `127.0.0.1`.
+
+**Eclipse resistance.** A node keeps its cached address book across restarts
+and prefers a tried/new mix, so a single seed cannot replace the whole peer
+set; outbound slots are filled from the manager, not only from gossip. There
+is no per-IP subnet bucketing or feeler connection yet (see
+[Status / limitations](#status--limitations)).
 
 ---
 
@@ -469,7 +541,8 @@ retry policy is a strict extension that changes nothing on the wire.
 | Peer record freshness | ±`SAN_PEER_TTL` (default 300 s) and signature verification; unsigned records rejected by default. |
 | Dead-peer claims | `DEAD_PEER` is not trusted; eviction requires the local ping threshold. |
 | Orphan/request bounds | `SAN_MAX_ORPHANS` buffered fork blocks, `SAN_MAX_REORG_DEPTH` reorg bound, 512 in-flight block requests (reset when exceeded). |
-| TLS | server certificate from `SAN_TLS_CERT`/`SAN_TLS_KEY`; clients verify with `SAN_TLS_CA` or the system trust store; with TLS the peer host is pinned via `grpc.WithAuthority(host)` for self-signed certificates (`dialPeer`, `TransportClientCredentials`). |
+| TLS | server certificate from `SAN_TLS_CERT`/`SAN_TLS_KEY`; clients verify with `SAN_TLS_CA` or the system trust store; with TLS the peer host is pinned via `grpc.WithAuthority(host)` for self-signed certificates (`dialPeer`, `TransportClientCredentials`). `sanup cert` generates a devnet CA + node certificate for this. |
+| Outbound backpressure | `PeerStream.Close` waits at most 500 ms for the sender, then closes the gRPC connection to unblock a sender stuck in flow control; `CloseSend` is only called once the sender stopped (calling it concurrently with `Send` races inside gRPC). Regression test: `internal/netnode/transport_leak_test.go` (F15 fixed). |
 | Vote bounds | `VoteMaxBytes`, `VoteLookahead` and staged-voter caps (see the consensus document). |
 
 ---
@@ -507,6 +580,12 @@ retry policy is a strict extension that changes nothing on the wire.
 | `SAN_DISCOVERY_INTERVAL` (registry loop) | 5 s | `internal/netnode/discovery.go` |
 | `SAN_DISCOVERY_TTL` (registry freshness) | 600 s | `internal/netnode/discovery.go` |
 | Local fallback probe interval | 30 s (ports 8000-8010 / 8770-8780) | `internal/netnode/discovery.go` |
+| `SAN_DNS_SEEDS` refresh interval | 5 min | `internal/netnode/discovery.go` |
+| `SAN_MAX_ADDR_ENTRIES` (addrman cap) | 1024 | `internal/netnode/config.go` |
+| `SAN_OUTBOUND_PEERS` (outbound slots) | 8 | `internal/netnode/config.go` |
+| `SAN_PEERS_CACHE` (addrman file) | `<db dir>/peers-cache.json` | `internal/netnode/config.go` |
+| Addrman flush / stale TTL | 60 s / 30 days | `internal/netnode/outbound.go`, `internal/netnode/addrman.go` |
+| Reconnect backoff | `5 s * 2^failures`, max 15 min, evict at 5 | `internal/netnode/addrman.go` |
 
 ---
 
@@ -561,3 +640,15 @@ retry policy is a strict extension that changes nothing on the wire.
   two-node discovery integration test lives in
   `internal/netnode/discovery_test.go`, and `cmd/sane2e` exercises
   auto-discovery end to end with three nodes.
+* **Wide-area discovery is Go-only too** (section 2.6). DNS seeds, the
+  address manager, outbound slots and the peer cache have no Python
+  counterpart, but no wire message changed, so a Go node can bootstrap from
+  and gossip with Python nodes; only Go nodes benefit from the cache/backoff.
+* **No subnet bucketing or feeler connections yet.** The addrman is a flat,
+  bounded set with a tried/new mix and per-entry backoff; it does not bucket by
+  /16 (or IPv6 /32) and does not probe random addresses. This is weaker than
+  Bitcoin's eclipse resistance and is a documented residual risk.
+* **Windows stop is forced.** `sanup --stop` on Windows uses `taskkill /F`,
+  so the child cannot save the cache on exit; the outbound loop flushes it
+  every 60 s instead. On Linux `SIGTERM` runs the graceful `Stop()` path and
+  saves immediately.

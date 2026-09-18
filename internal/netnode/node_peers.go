@@ -7,6 +7,7 @@ import (
 	"log"
 	"math/rand"
 	"sort"
+	"strings"
 	"time"
 
 	"github.com/alibertay/san_network/internal/canonical"
@@ -138,21 +139,40 @@ func (n *Node) isSelf(peer map[string]any) bool {
 }
 
 func (n *Node) mergePeers(peers any) int {
+	return n.mergePeersFrom(peers, AddrSourceGossip)
+}
+
+// mergePeersFrom merges records and records their discovery source in the
+// address manager.
+func (n *Node) mergePeersFrom(peers any, source string) int {
 	added := 0
 	switch typed := peers.(type) {
 	case []any:
 		for _, raw := range typed {
-			added += n.addPeer(raw)
+			added += n.addPeerFrom(raw, source)
 		}
 	case []map[string]any:
 		for _, raw := range typed {
-			added += n.addPeer(raw)
+			added += n.addPeerFrom(raw, source)
 		}
 	}
 	return added
 }
 
+// addRecords merges registry/cache records and refreshes the selection.
+func (n *Node) addRecords(records []map[string]any, source string) int {
+	added := n.mergePeersFrom(records, source)
+	if added > 0 {
+		n.refreshPeerSelection()
+	}
+	return added
+}
+
 func (n *Node) addPeer(raw any) int {
+	return n.addPeerFrom(raw, AddrSourceGossip)
+}
+
+func (n *Node) addPeerFrom(raw any, source string) int {
 	record, ok := CompletePeer(raw, n.config)
 	if !ok || n.isSelf(record) {
 		return 0
@@ -173,6 +193,9 @@ func (n *Node) addPeer(raw any) int {
 		return 0
 	}
 	n.PEERS = append(n.PEERS, record)
+	if n.addrman != nil {
+		n.addrman.Add(record, source)
+	}
 	return 1
 }
 
@@ -509,26 +532,29 @@ func (n *Node) sendToPeer(ctx context.Context, peer map[string]any, portKey, mes
 // ---------------------------------------------------------------------- #
 
 func (n *Node) bootstrap(ctx context.Context) {
-	if n.config.Bootstrap == nil || *n.config.Bootstrap == "" {
+	addresses := n.config.BootstrapAddresses()
+	if len(addresses) == 0 {
 		return
 	}
-	address := *n.config.Bootstrap
-	var peers []any
-	remotePeers, err := RemoteBootstrap(ctx, n, address, 5*time.Second)
-	if err != nil {
-		log.Printf("gRPC bootstrap failed (%v); trying the REST endpoint", err)
-	} else {
-		peers = remotePeers
+	for _, address := range addresses {
+		var peers []any
+		remotePeers, err := RemoteBootstrap(ctx, n, address, 5*time.Second)
+		if err != nil {
+			log.Printf("gRPC bootstrap %s failed (%v); trying the REST endpoint", address, err)
+		} else {
+			peers = remotePeers
+		}
+		if len(peers) == 0 {
+			peers = n.DiscoverPeers(address)
+		}
+		n.mergePeersFrom(peers, AddrSourceBootstrap)
 	}
-	if len(peers) == 0 {
-		peers = n.DiscoverPeers(address)
-	}
-	n.AddPeers(peers)
+	n.refreshPeerSelection()
 	n.mu.Lock()
 	hasPeers := len(n.PEERS) > 0
 	n.mu.Unlock()
 	if !hasPeers {
-		log.Printf("Bootstrap %s returned no usable peers", address)
+		log.Printf("Bootstrap %s returned no usable peers", strings.Join(addresses, ", "))
 		return
 	}
 	n.RegisterToNetwork(ctx)

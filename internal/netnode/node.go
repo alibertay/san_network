@@ -113,6 +113,10 @@ type Node struct {
 	registry        *PeerRegistry
 	syncInFlight    atomic.Bool
 
+	// Wide-area discovery: persisted address manager and outbound dialer.
+	addrman      *AddrManager
+	outboundDial outboundDialFunc
+
 	blockchain    *ledger.Blockchain
 	rewardAddress string
 
@@ -320,7 +324,7 @@ func (n *Node) Start(ctx context.Context) error {
 		cancel()
 		return err
 	}
-	if n.config.DiscoveryEnabled {
+	if n.discoveryActive() {
 		n.startDiscovery(runCtx)
 	}
 	n.bootstrap(runCtx)
@@ -358,6 +362,11 @@ func (n *Node) Stop() {
 		n.registry = nil
 		if err := registry.Remove(n.identity.PublicKeyHex(), "", 0); err != nil {
 			log.Printf("Cannot remove the peer registry entry: %v", err)
+		}
+	}
+	if n.addrman != nil {
+		if err := n.addrman.Save(); err != nil {
+			log.Printf("Cannot save the peer cache: %v", err)
 		}
 	}
 	for _, server := range n.servers {

@@ -24,7 +24,7 @@ func NewServer(node *netnode.Node, config netnode.NodeConfig) *Server {
 	mux := http.NewServeMux()
 	server.register(mux)
 	server.limiter = newRateLimiter(config.RPCRateLimit, config.RPCRateWindow, config.RPCMaxBody)
-	server.handler = server.limiter.wrap(mux)
+	server.handler = server.limiter.wrap(server.wrapAuth(mux))
 	return server
 }
 

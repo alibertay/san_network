@@ -9,8 +9,12 @@ import (
 	"github.com/alibertay/san_network/internal/sdk"
 )
 
-func newHealthClient(host string, port int, timeout time.Duration) *sdk.SanClient {
-	return sdk.NewSanClient(apiURL(host, port), nil, timeout)
+func newHealthClient(host string, port int, timeout time.Duration, token ...string) *sdk.SanClient {
+	client := sdk.NewSanClient(apiURL(host, port), nil, timeout)
+	if len(token) > 0 {
+		client.SetToken(token[0])
+	}
+	return client
 }
 
 // reconcileStake drives the on-chain stake to targetUnits. Increases are a

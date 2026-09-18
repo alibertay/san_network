@@ -5,10 +5,21 @@ package netnode
 import (
 	"log"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
 	"github.com/alibertay/san_network/internal/ledger"
+)
+
+// Wide-area discovery defaults (Bitcoin-inspired).
+const (
+	// DefaultMaxAddrEntries caps the persisted address manager.
+	DefaultMaxAddrEntries = 1024
+	// DefaultOutboundPeers is the number of outbound slots the node maintains.
+	DefaultOutboundPeers = 8
+	// DefaultPeerCacheFile is the address-manager file name.
+	DefaultPeerCacheFile = "peers-cache.json"
 )
 
 // DefaultChainID is the devnet chain id.
@@ -72,6 +83,17 @@ type NodeConfig struct {
 	DiscoveryInterval float64
 	DiscoveryTTL      float64
 	DiscoveryProbe    bool
+
+	// Wide-area discovery (Bitcoin/Ethereum style).
+	DNSSeeds       []string // DNS seed hostnames (optionally host:port)
+	BootstrapPeers []string // explicit seed addresses host:port
+	PeerCachePath  string   // addrman persistence; default next to DBPath
+	MaxAddrEntries int
+	OutboundPeers  int
+
+	// Public API hardening.
+	APIHost  string // REST bind host; empty means Host
+	APIToken string // optional bearer token
 }
 
 // DefaultNodeConfig returns the Python dataclass defaults.
@@ -118,6 +140,8 @@ func DefaultNodeConfig() NodeConfig {
 		DiscoveryInterval:  DefaultDiscoveryInterval,
 		DiscoveryTTL:       DefaultDiscoveryTTL,
 		DiscoveryProbe:     true,
+		MaxAddrEntries:     DefaultMaxAddrEntries,
+		OutboundPeers:      DefaultOutboundPeers,
 	}
 }
 
@@ -266,7 +290,80 @@ func NodeConfigFromEnv() NodeConfig {
 	config.DiscoveryInterval = envFloat("SAN_DISCOVERY_INTERVAL", DefaultDiscoveryInterval)
 	config.DiscoveryTTL = envFloat("SAN_DISCOVERY_TTL", DefaultDiscoveryTTL)
 	config.DiscoveryProbe = envBool("SAN_DISCOVERY_PROBE", true)
+	config.DNSSeeds = splitList(envStringValue("SAN_DNS_SEEDS"))
+	config.BootstrapPeers = splitList(envStringValue("SAN_BOOTSTRAP"))
+	config.PeerCachePath = envStringValue("SAN_PEERS_CACHE")
+	config.MaxAddrEntries = int(envInt("SAN_MAX_ADDR_ENTRIES", DefaultMaxAddrEntries))
+	if config.MaxAddrEntries < 1 {
+		config.MaxAddrEntries = DefaultMaxAddrEntries
+	}
+	config.OutboundPeers = int(envInt("SAN_OUTBOUND_PEERS", DefaultOutboundPeers))
+	if config.OutboundPeers < 0 {
+		config.OutboundPeers = DefaultOutboundPeers
+	}
+	config.APIHost = envStringValue("SAN_API_HOST")
+	config.APIToken = envStringValue("SAN_API_TOKEN")
 	return config
+}
+
+// splitList parses a comma-separated list, dropping empty entries.
+func splitList(raw string) []string {
+	values := []string{}
+	for _, entry := range strings.Split(raw, ",") {
+		entry = strings.TrimSpace(entry)
+		if entry == "" {
+			continue
+		}
+		values = append(values, entry)
+	}
+	return values
+}
+
+// BootstrapAddresses returns the explicit seed list: the comma-separated
+// SAN_BOOTSTRAP entries plus the single Bootstrap value when it predates the
+// list field (tests and embedders set it directly).
+func (config NodeConfig) BootstrapAddresses() []string {
+	addresses := append([]string{}, config.BootstrapPeers...)
+	if config.Bootstrap != nil && strings.TrimSpace(*config.Bootstrap) != "" {
+		for _, entry := range splitList(*config.Bootstrap) {
+			duplicate := false
+			for _, known := range addresses {
+				if known == entry {
+					duplicate = true
+					break
+				}
+			}
+			if !duplicate {
+				addresses = append(addresses, entry)
+			}
+		}
+	}
+	return addresses
+}
+
+// WideAreaConfigured reports whether DNS seeds or explicit bootstrap seeds are
+// configured (the local registry then stays a fallback only).
+func (config NodeConfig) WideAreaConfigured() bool {
+	return len(config.DNSSeeds) > 0 || len(config.BootstrapAddresses()) > 0
+}
+
+// ResolvedPeerCachePath returns SAN_PEERS_CACHE, otherwise
+// <db dir>/peers-cache.json, otherwise ~/.san/peers-cache.json.
+func (config NodeConfig) ResolvedPeerCachePath() string {
+	if path := strings.TrimSpace(config.PeerCachePath); path != "" {
+		return path
+	}
+	if config.DBPath != nil {
+		dbPath := strings.TrimSpace(*config.DBPath)
+		if dbPath != "" && dbPath != ":memory:" {
+			return filepath.Join(filepath.Dir(dbPath), DefaultPeerCacheFile)
+		}
+	}
+	home, err := os.UserHomeDir()
+	if err != nil || home == "" {
+		return ""
+	}
+	return filepath.Join(home, ".san", DefaultPeerCacheFile)
 }
 
 func envStringValue(name string) string {

@@ -17,8 +17,19 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/peer"
 	"google.golang.org/grpc/status"
 )
+
+// inboundRemoteAddress returns the observed remote address of a gRPC call, or
+// "" when the transport does not expose it.
+func inboundRemoteAddress(ctx context.Context) string {
+	remote, ok := peer.FromContext(ctx)
+	if !ok || remote.Addr == nil {
+		return ""
+	}
+	return remote.Addr.String()
+}
 
 // Per-session buffers are bounded so a flooding peer applies backpressure
 // instead of growing memory; the semaphore caps concurrent sessions.
@@ -50,6 +61,8 @@ type NodeTransport interface {
 	TransportClientCredentials(peer map[string]any) credentials.TransportCredentials
 	HelloPayload(messageType string) map[string]any
 	VerifyHello(data map[string]any) bool
+	SelfPeerRecord() map[string]any
+	NoteInboundPeer(address string)
 }
 
 // PeerStream is a JSON-message session over a gRPC bidirectional stream.
@@ -158,6 +171,10 @@ func (server *p2pServer) Session(stream grpc.BidiStreamingServer[netproto.Envelo
 	}
 	defer server.release(server.sessions)
 
+	if remote := inboundRemoteAddress(ctx); remote != "" {
+		server.node.NoteInboundPeer(remote)
+	}
+
 	label := "grpc-session"
 	inbound := make(chan string, SessionQueueSize)
 	outbound := make(chan string, SessionQueueSize)
@@ -264,9 +281,13 @@ func (server *p2pServer) Sync(ctx context.Context, request *netproto.SyncRequest
 	return &netproto.SyncResponse{Payload: encoded}, nil
 }
 
-// Bootstrap returns the seed's peer list.
+// Bootstrap returns the seed's peer list plus its own signed record (the REST
+// /bootstrap endpoint does the same), so a joining node learns the seed's
+// advertised address as well.
 func (server *p2pServer) Bootstrap(ctx context.Context, _ *netproto.Empty) (*netproto.Envelope, error) {
-	encoded, err := canonical.Marshal(map[string]any{"peers": server.node.Peers()})
+	peers := server.node.Peers()
+	peers = append(peers, server.node.SelfPeerRecord())
+	encoded, err := canonical.Marshal(map[string]any{"peers": peers})
 	if err != nil {
 		return nil, status.Error(codes.Internal, "bootstrap encoding failed")
 	}
@@ -411,11 +432,26 @@ func OpenSession(ctx context.Context, node NodeTransport, peer map[string]any, p
 	}()
 
 	peerStream.closeCallback = func() {
-		// Wait for the queued messages to reach gRPC before tearing the
-		// connection down (a plain connection.Close() races the sender).
-		<-senderDone
-		_ = stream.CloseSend()
+		// Wait briefly for the queued messages to reach gRPC, but never
+		// forever: a hostile peer that stops reading leaves the sender
+		// blocked inside stream.Send (gRPC flow control). Tearing the
+		// connection down unblocks it, so Close cannot leak a goroutine.
+		// CloseSend is only called once the sender stopped; calling it
+		// concurrently with an in-flight Send races inside gRPC.
+		stuck := false
+		select {
+		case <-senderDone:
+		case <-time.After(500 * time.Millisecond):
+			stuck = true
+		}
+		if !stuck {
+			_ = stream.CloseSend()
+		}
 		connection.Close()
+		select {
+		case <-senderDone:
+		case <-time.After(time.Second):
+		}
 	}
 
 	handshakeCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -489,15 +525,11 @@ func RemoteStatus(ctx context.Context, node NodeTransport, peer map[string]any, 
 	return payload
 }
 
-// RemoteBootstrap asks a seed for its peer list.
-func RemoteBootstrap(ctx context.Context, node NodeTransport, address string, timeout time.Duration) ([]any, error) {
-	host, port, found := cutLast(address, ":")
-	if !found {
-		return nil, &PeerConnectionError{Message: fmt.Sprintf("invalid bootstrap address %q", address)}
-	}
-	connection, err := grpc.NewClient(host+":"+port,
-		append(channelOptions(map[string]any{}, node.WSMaxSize()),
-			grpc.WithTransportCredentials(insecure.NewCredentials()))...)
+// remoteBootstrapPeer asks a peer record for its bootstrap list over the
+// transport configured for that record (TLS-aware), including the peer's own
+// signed record.
+func remoteBootstrapPeer(ctx context.Context, node NodeTransport, peer map[string]any, portKey string, timeout time.Duration) ([]any, error) {
+	connection, err := dialPeer(ctx, node, peer, portKey)
 	if err != nil {
 		return nil, err
 	}
@@ -517,6 +549,16 @@ func RemoteBootstrap(ctx context.Context, node NodeTransport, address string, ti
 	payload, _ := value.(map[string]any)
 	peers, _ := payload["peers"].([]any)
 	return peers, nil
+}
+
+// RemoteBootstrap asks a seed for its peer list by address; the legacy helper
+// stays plaintext (use remoteBootstrapPeer for TLS-aware dials).
+func RemoteBootstrap(ctx context.Context, node NodeTransport, address string, timeout time.Duration) ([]any, error) {
+	host, port, found := cutLast(address, ":")
+	if !found {
+		return nil, &PeerConnectionError{Message: fmt.Sprintf("invalid bootstrap address %q", address)}
+	}
+	return remoteBootstrapPeer(ctx, node, map[string]any{"host": host, "p2p_port": port}, "p2p_port", timeout)
 }
 
 func cutLast(text, separator string) (string, string, bool) {

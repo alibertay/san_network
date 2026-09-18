@@ -85,27 +85,81 @@ this pass, `[documented]` means reviewed and accepted for a first devnet.
 
 ---
 
-## 4. Residual risks for the first devnet
+## 4. Residual risks (public-devnet pass update)
 
-1. **TLS is opt-in.** Without `SAN_TLS_CERT/SAN_TLS_KEY` (and `SAN_TLS_CA` on
-   peers) all P2P traffic is plaintext; the node logs a warning at startup.
-   Acceptable for a loopback/devnet; enable TLS before any public network.
-2. **REST API has no authentication.** `/transaction`, `/join` and the read
-   routes are open to anyone who can reach the port; the rate limiter is the
-   only abuse control. Bind to loopback (`--host 127.0.0.1`) as `sanup` does
-   by default.
-3. **LMDB needs cgo.** The default Windows build uses the in-memory/no-op
-   store (`SAN_DB_BACKEND=memory` under `sanup`); persistence requires a
-   `-tags lmdb` build on a machine with a C toolchain. The LMDB map grows
-   automatically and is not disk-quota-limited.
-4. **Auto-discovery is same-machine only** (file registry + loopback port
-   probing); it is not a substitute for real peer discovery.
-5. **Outbound-send backpressure** (F15) can leak a blocked goroutine per
-   hostile peer that stops reading; bounded but not fixed in this pass.
-6. **Python interop edge cases** (F13/F14) for lone surrogates and invalid
-   `\U` literals; irrelevant while all nodes run the Go implementation.
-7. **No audit of the generated gRPC stubs** beyond default message-size caps
-   (`WSMaxSize`, default 1 MiB) and the session/sync semaphores.
+The first-devnet residuals were re-reviewed before the public devnet on
+VPSs; each entry below states the new status.
+
+1. **TLS is opt-in, but one command now enables it.** `sanup cert`
+   (`cmd/sanup/certs.go`, `internal/tlsutil`) generates a devnet CA and a node
+   certificate (ECDSA P-256, SANs = advertise host + localhost, key 0600);
+   `sanup --tls-cert/--tls-key/--tls-ca` sets the `SAN_*` variables. A Go test
+   starts two nodes with generated certs and completes the HELLO handshake
+   over TLS (`internal/netnode/tls_test.go`). Residual: peer certificates are
+   verified but not pinned to node identities (no mTLS), and certificate
+   rotation is manual. Without `SAN_TLS_*` traffic is still plaintext and the
+   node logs a warning.
+2. **REST API authentication is now available.** `SAN_API_TOKEN` (or
+   `sanup --api-token`) requires `Authorization: Bearer <token>` on every
+   route, compared with `crypto/subtle.ConstantTimeCompare`; failures use the
+   FastAPI shape `401 {"detail": "Unauthorized"}` (`internal/api/auth.go`,
+   `internal/api/auth_test.go`). The SDK sends the token
+   (`SanClient.SetToken`), and sanup threads it through health/status/genesis
+   calls. Residual: unset by default (devnet mode) and the rate limiter is
+   still the only abuse control in that case; bind the API to a private
+   interface or a reverse proxy for public nodes.
+3. **LMDB still needs cgo, with an actionable error.** Requesting
+   `SAN_DB_BACKEND=lmdb` in a build without the tag now fails with a message
+   naming the path, `-tags lmdb` and the memory fallback
+   (`internal/ledger/store/lmdb_stub.go`, test `lmdb_stub_test.go`).
+   Production VPS builds should compile with `CGO_ENABLED=1 go build -tags
+   lmdb`; the LMDB map still grows automatically and is not disk-quota
+   limited.
+4. **Auto-discovery is no longer same-machine only.** DNS seeds
+   (`SAN_DNS_SEEDS`), explicit bootstrap lists (`SAN_BOOTSTRAP`, comma
+   separated), a persisted address manager (`SAN_PEERS_CACHE`), outbound
+   slots (`SAN_OUTBOUND_PEERS`, default 8), reconnect backoff and gossip-fed
+   addresses implement the wide-area path; the file registry and loopback
+   probe are documented fallbacks only. Evidence: `addrman_test.go`,
+   `dnsseed_test.go`, `outbound_test.go`, `gossip_addrman_test.go` and the
+   two-node bootstrap/cache/restart test `wide_area_test.go`. Residual: no
+   subnet bucketing or feeler connections (see `docs/gossip.md` limitations),
+   and DNS seeds remain a centralization/censorship point mitigated by
+   bootstrap lists and the cache.
+5. **Outbound-flow-control goroutine leak (F15) is fixed.**
+   `PeerStream.Close` waits at most 500 ms for the sender, then closes the
+   gRPC connection to unblock a sender stuck in flow control; `CloseSend` is
+   only called once the sender stopped (calling it concurrently with `Send`
+   races inside gRPC, found by `-race`).
+   `internal/netnode/transport_leak_test.go` reproduces the hostile
+   non-reading peer and asserts Close returns and goroutines unwind.
+6. **Python surrogate/`\U` edge cases stay documented non-issues.**
+   Implementing Python's lone-surrogate round trip exactly is not possible in
+   Go's UTF-8 strings (Decode normalizes to U+FFFD), and Python's `json`
+   rejects `\U` escapes just like Go. `internal/canonical/surrogate_test.go`
+   shows every string the protocol signs or hashes (hex keys/hashes,
+   addresses, chain ids, type names) is ASCII and round-trips byte-identically,
+   so the divergence is unreachable in protocol traffic. Mixed Go/Python
+   networks must not place lone surrogates in signed fields.
+7. **gRPC stubs unchanged.** The generated stubs were not audited beyond the
+   default message-size caps (`SAN_WS_MAX_SIZE`, 1 MiB) and the
+   session/sync semaphores; this remains a residual for a first public devnet.
+
+### 4.1 Verification of the public-devnet pass
+
+| Check | Command | Result |
+|-------|---------|--------|
+| Formatting | `gofmt -l .` | clean |
+| Build | `go build ./...` | pass |
+| Vet | `go vet ./...` | pass |
+| Unit tests | `go test ./... -count=1` | pass |
+| Race detector (WSL + gcc) | `go test -race -count=1 ./internal/netnode/... ./internal/api/... ./internal/sdk/... ./internal/ledger/...` | pass, no races |
+| End-to-end | `go run ./cmd/sane2e` | `5 passed, 0 failed` |
+| Python reference | `python -m pytest tests/test_units.py tests/test_asm.py -q` | `82 passed` |
+| TLS | `internal/netnode/tls_test.go` (generated CA/certs, HELLO + PING/PONG over TLS) | pass |
+| REST auth | `internal/api/auth_test.go` | pass |
+| F15 leak | `internal/netnode/transport_leak_test.go` | pass |
+| Wide-area two-node | `internal/netnode/wide_area_test.go` (registry disabled, bootstrap-only join, transfer, cache restart) | pass |
 
 ---
 
@@ -129,3 +183,30 @@ this pass, `[documented]` means reviewed and accepted for a first devnet.
 `internal/ledger/identity.go`, `internal/crypto/crypto.go`,
 `internal/sanvm/asm.go`, `cmd/sanup/status.go`, `cmd/sanup/state.go`,
 `cmd/sanup/proc_windows.go`, `cmd/sanup/proc_other.go`.
+
+---
+
+## 6. Files added/changed in the public-devnet pass
+
+**Added:** `internal/netnode/addrman.go`, `internal/netnode/addrman_test.go`,
+`internal/netnode/dnsseed.go`, `internal/netnode/dnsseed_test.go`,
+`internal/netnode/outbound.go`, `internal/netnode/outbound_test.go`,
+`internal/netnode/gossip_addrman_test.go`,
+`internal/netnode/wide_area_test.go`, `internal/netnode/tls_test.go`,
+`internal/netnode/transport_leak_test.go`, `internal/tlsutil/tlsutil.go`,
+`internal/api/auth.go`, `internal/api/auth_test.go`,
+`internal/canonical/surrogate_test.go`,
+`internal/ledger/store/lmdb_stub_test.go`, `cmd/sanup/certs.go`,
+`cmd/sanup/public_devnet_test.go`.
+
+**Edited (Go only):** `internal/netnode/config.go`,
+`internal/netnode/discovery.go`, `internal/netnode/node.go`,
+`internal/netnode/node_peers.go`, `internal/netnode/transport.go`,
+`internal/netnode/node_test.go`, `internal/netnode/discovery_test.go`,
+`internal/netnode/recover_test.go`, `internal/api/server.go`,
+`internal/api/run.go`, `internal/sdk/client.go`, `internal/ledger/store/lmdb_stub.go`,
+`cmd/sanup/main.go`, `cmd/sanup/genesis.go`, `cmd/sanup/state.go`,
+`cmd/sanup/status.go`, `cmd/sanup/stake.go`, `README.md`, `INSTALL.md`,
+`docs/gossip.md`, `docs/security-review.md`.
+
+**Not touched:** all Python implementation and reference files.

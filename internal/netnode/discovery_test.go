@@ -49,6 +49,7 @@ func TestDiscoveryFindsPeersAndPropagatesBlock(t *testing.T) {
 		config.GenesisAllocations = map[string]int64{addressA: allocations[addressA]}
 		config.DiscoveryEnabled = true
 		config.PeerRegistryPath = registryPath
+		config.PeerCachePath = filepath.Join(filepath.Dir(registryPath), "peers-cache.json")
 		config.DiscoveryInterval = 0.1
 		config.DiscoveryTTL = 60
 		config.DiscoveryProbe = false

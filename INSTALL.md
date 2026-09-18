@@ -277,3 +277,58 @@ docker compose --profile go up -d san-node-go   # API on host port 18000
 
 See [GO_MIGRATION.md](GO_MIGRATION.md) for the Python-to-Go package map and
 the parity fixture workflow.
+
+## 11. Public devnet on a VPS (Go)
+
+The Go node is the implementation for a public devnet (the Python tree is the
+frozen reference). Discovery uses DNS seeds + explicit bootstrap addresses +
+a persisted address manager; the same-machine registry is only a fallback.
+Full walkthrough: [README](README.md#public-devnet-on-a-vps).
+
+**Open TCP ports** (defaults): `api` 8000, `p2p` 8765, `peer` 8770,
+`controller` 8769. The three gRPC ports serve the same service, so one range
+rule (`8765-8770`) is enough. Behind NAT/cloud security groups forward the
+same ports and advertise the public name or IP.
+
+```bash
+# seed node (new chain)
+go run ./cmd/sanup --seed --host 0.0.0.0 --api-host 0.0.0.0 \
+    --advertise-host seed.example.com --data-dir /var/lib/san/seed
+
+# joining node (wide-area discovery; peers via the seed, genesis fetched
+# from its REST port 8000)
+go run ./cmd/sanup --host 0.0.0.0 --api-host 0.0.0.0 \
+    --advertise-host node2.example.com --seeds seed.example.com \
+    --data-dir /var/lib/san/node2
+```
+
+`--seeds` accepts DNS names or `host:port`; `--bootstrap host:api_port` pins
+the genesis source explicitly. The address cache
+(`<data-dir>/peers-cache.json`, `--peer-cache FILE`) reconnects a restarted
+node without a seed. `--no-registry` disables the local registry.
+
+**TLS** (self-signed devnet CA, one command per node):
+
+```bash
+go run ./cmd/sanup cert --dir /etc/san/certs --advertise-host node2.example.com
+# copy ca.crt to every machine, then add to each node:
+#   --tls-cert /etc/san/certs/node.crt --tls-key /etc/san/certs/node.key \
+#   --tls-ca /etc/san/certs/ca.crt
+```
+
+**REST auth:** add `--api-token TOKEN` (or `SAN_API_TOKEN`) on any node whose
+API is publicly reachable; clients then send `Authorization: Bearer TOKEN`.
+
+**Service:** run under systemd (`Restart=always`; `SIGTERM` shuts the node
+down gracefully and flushes the peer cache) or, on Windows, register the
+staged `<data-dir>\sanup-node.exe` with `sc.exe`/NSSM. `sanup --stop` is a
+forced kill on Windows, so the cache is flushed by the node every 60 s.
+
+**Persistence:** production VPS builds should use LMDB:
+
+```bash
+CGO_ENABLED=1 go build -tags lmdb -o /usr/local/bin/sanup ./cmd/sanup
+```
+
+Without the tag, `SAN_DB_BACKEND=lmdb` now fails with an actionable error
+suggesting `-tags lmdb` or `SAN_DB_BACKEND=memory`.

@@ -23,6 +23,8 @@ func (panickingTransport) TransportClientCredentials(map[string]any) credentials
 }
 func (panickingTransport) HelloPayload(string) map[string]any { return nil }
 func (panickingTransport) VerifyHello(map[string]any) bool    { return false }
+func (panickingTransport) SelfPeerRecord() map[string]any     { return nil }
+func (panickingTransport) NoteInboundPeer(string)             {}
 
 func TestRunPeerSessionRecoversPanic(t *testing.T) {
 	server := &p2pServer{

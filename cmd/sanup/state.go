@@ -17,18 +17,19 @@ const stateFileName = "sanup.json"
 
 // nodeState is the pid/state record stored in the data directory.
 type nodeState struct {
-	PID            int     `json:"pid"`
-	Address        string  `json:"address"`
-	PublicKey      string  `json:"public_key"`
-	Host           string  `json:"host"`
-	APIPort        int     `json:"api_port"`
-	P2PPort        int     `json:"p2p_port"`
-	PeerPort       int     `json:"peer_port"`
-	ControllerPort int     `json:"controller_port"`
-	ChainID        string  `json:"chain_id"`
-	StartedAt      float64 `json:"started_at"`
-	Seed           bool    `json:"seed"`
-	LogFile        string  `json:"log_file"`
+	PID            int               `json:"pid"`
+	Address        string            `json:"address"`
+	PublicKey      string            `json:"public_key"`
+	Host           string            `json:"host"`
+	APIPort        int               `json:"api_port"`
+	P2PPort        int               `json:"p2p_port"`
+	PeerPort       int               `json:"peer_port"`
+	ControllerPort int               `json:"controller_port"`
+	ChainID        string            `json:"chain_id"`
+	StartedAt      float64           `json:"started_at"`
+	Seed           bool              `json:"seed"`
+	LogFile        string            `json:"log_file"`
+	GenesisEnv     map[string]string `json:"genesis_env,omitempty"`
 }
 
 func statePath(dataDir string) string {
@@ -228,10 +229,15 @@ func spawnChild(executable string, env []string, logPath string) (int, error) {
 // ---------------------------------------------------------------------- #
 
 func nodeHealthy(host string, port int, timeout time.Duration) bool {
+	return nodeHealthyAuth(host, port, timeout, "")
+}
+
+// nodeHealthyAuth is nodeHealthy with the optional bearer token.
+func nodeHealthyAuth(host string, port int, timeout time.Duration, token string) bool {
 	if port <= 0 {
 		return false
 	}
-	client := newHealthClient(host, port, timeout)
+	client := newHealthClient(host, port, timeout, token)
 	health, err := client.Health()
 	if err != nil {
 		return false
@@ -240,11 +246,11 @@ func nodeHealthy(host string, port int, timeout time.Duration) bool {
 	return status == "ok"
 }
 
-func waitHealthy(host string, port int, timeoutSeconds float64) error {
+func waitHealthy(host string, port int, timeoutSeconds float64, token string) error {
 	deadline := time.Now().Add(time.Duration(timeoutSeconds * float64(time.Second)))
 	lastError := "not ready"
 	for time.Now().Before(deadline) {
-		client := newHealthClient(host, port, 2*time.Second)
+		client := newHealthClient(host, port, 2*time.Second, token)
 		health, err := client.Health()
 		if err == nil {
 			if status, _ := health["status"].(string); status == "ok" {
