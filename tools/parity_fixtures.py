@@ -20,14 +20,11 @@ ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
 from blockchain import crypto  # noqa: E402
-from blockchain.Block import Block  # noqa: E402
-from blockchain.Blockchain import GENESIS_MESSAGE, Blockchain  # noqa: E402
-from blockchain.Transaction import Transaction  # noqa: E402
 from blockchain.address import (  # noqa: E402
     address_from_public_key,
-    is_valid_address,
-    normalize_address,
 )
+from blockchain.Block import Block  # noqa: E402
+from blockchain.Blockchain import GENESIS_MESSAGE, Blockchain  # noqa: E402
 from blockchain.economics import (  # noqa: E402
     fee_rate_for_transaction_count,
     next_base_fee,
@@ -45,6 +42,7 @@ from blockchain.merkle import (  # noqa: E402
 )
 from blockchain.persistence import ChainStore  # noqa: E402
 from blockchain.storage import MemoryStore  # noqa: E402
+from blockchain.Transaction import Transaction  # noqa: E402
 from utils import canonical  # noqa: E402
 
 CHAIN_ID = "san-devnet-1"
@@ -643,8 +641,8 @@ def sanvm_limit_fixtures():
 
 
 def sanvm_error_fixtures():
-    from SANVM.pena_parser import PenaParser
     from SANVM.asm import assemble
+    from SANVM.pena_parser import PenaParser
 
     errors = []
     for source in [
