@@ -55,6 +55,20 @@ san_peer_malformed_messages 0
 san_peer_rate_limit_hits 0
 # TYPE san_peer_invalid_records counter
 san_peer_invalid_records 0
+# TYPE san_mempool_rejected counter
+san_mempool_rejected 0
+# TYPE san_orphans_evicted counter
+san_orphans_evicted 0
+# TYPE san_block_requests_rejected counter
+san_block_requests_rejected 0
+# TYPE san_staged_votes_rejected counter
+san_staged_votes_rejected 0
+# TYPE san_peers_rejected_table counter
+san_peers_rejected_table 0
+# TYPE san_vote_seen_cache_resets counter
+san_vote_seen_cache_resets 0
+# TYPE san_http_body_rejected counter
+san_http_body_rejected 0
 # TYPE san_height gauge
 san_height 0
 # TYPE san_finalized_height gauge

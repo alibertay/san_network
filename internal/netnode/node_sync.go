@@ -285,8 +285,12 @@ func (n *Node) requestBlock(ctx context.Context, blockHash string) bool {
 		n.mu.Unlock()
 		return false
 	}
-	if len(n.requestedBlocks) > 512 {
-		n.requestedBlocks = map[string]struct{}{}
+	// The in-flight request table is bounded; once full, new requests are
+	// rejected instead of reset (which would forget dedup state under load).
+	if limit := n.config.MaxBlockRequests; limit > 0 && len(n.requestedBlocks) >= limit {
+		n.mu.Unlock()
+		n.incMetric("block_requests_rejected")
+		return false
 	}
 	n.requestedBlocks[blockHash] = struct{}{}
 	n.mu.Unlock()

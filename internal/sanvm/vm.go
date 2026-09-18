@@ -33,6 +33,15 @@ const (
 	DefaultMaxStack     = 1024
 	DefaultMaxCallDepth = 64
 	MaxValueBytes       = 65_536
+	// DefaultMaxCollectionItems caps lists/dicts held in storage. The Python
+	// reference has no such cap; it is a Go-only DoS guard (documented in
+	// docs/chaos-limited-consensus.md) so a contract cannot grow a collection
+	// whose linear scans are paid for by O(1) gas.
+	DefaultMaxCollectionItems = 65_536
+	// collectionWordThreshold is the collection size at which superlinear
+	// operations (LIST_REMOVE scans, DICT_KEYS sorts) start charging one extra
+	// gas per 1024 items. Below it the gas schedule matches Python exactly.
+	collectionWordThreshold = 1024
 )
 
 // VM is the stack-based SAN virtual machine.
@@ -43,10 +52,13 @@ type VM struct {
 	MaxSteps     int
 	MaxStack     int
 	MaxCallDepth int
-	GasLimit     *int64
-	GasUsed      int64
-	Verbose      bool
-	Logs         []map[string]any
+	// MaxCollectionItems bounds the length of a stored list or dict. <= 0
+	// disables the cap (used by tests that need Python-identical behavior).
+	MaxCollectionItems int
+	GasLimit           *int64
+	GasUsed            int64
+	Verbose            bool
+	Logs               []map[string]any
 
 	Stack     []any
 	callStack []int64
@@ -63,12 +75,13 @@ func NewVM(storage *Storage) *VM {
 		storage = NewStorage()
 	}
 	virtualMachine := &VM{
-		Storage:      storage,
-		MaxSteps:     DefaultMaxSteps,
-		MaxStack:     DefaultMaxStack,
-		MaxCallDepth: DefaultMaxCallDepth,
-		Verbose:      true,
-		Logs:         []map[string]any{},
+		Storage:            storage,
+		MaxSteps:           DefaultMaxSteps,
+		MaxStack:           DefaultMaxStack,
+		MaxCallDepth:       DefaultMaxCallDepth,
+		MaxCollectionItems: DefaultMaxCollectionItems,
+		Verbose:            true,
+		Logs:               []map[string]any{},
 	}
 	virtualMachine.ContractManager = NewContractManager(storage)
 	return virtualMachine
@@ -363,7 +376,7 @@ func (virtualMachine *VM) arith(operator string) error {
 	}
 	result, err := binaryOp(operator, left, right)
 	if err != nil {
-		return &VMError{Message: err.Error()}
+		return err
 	}
 	return virtualMachine.pushValue(result)
 }
@@ -381,6 +394,29 @@ func binaryOp(operator string, left, right any) (any, error) {
 				combined = append(combined, leftList...)
 				combined = append(combined, rightList...)
 				return combined, nil
+			}
+		}
+	}
+	if operator == "*" {
+		// Python semantics: str * int and list * int repeat (negative -> empty).
+		if leftText, ok := left.(string); ok {
+			if count, ok := repetitionCount(right); ok {
+				return repeatString(leftText, count)
+			}
+		}
+		if rightText, ok := right.(string); ok {
+			if count, ok := repetitionCount(left); ok {
+				return repeatString(rightText, count)
+			}
+		}
+		if leftList, ok := left.([]any); ok {
+			if count, ok := repetitionCount(right); ok {
+				return repeatList(leftList, count)
+			}
+		}
+		if rightList, ok := right.([]any); ok {
+			if count, ok := repetitionCount(left); ok {
+				return repeatList(rightList, count)
 			}
 		}
 	}
@@ -409,7 +445,7 @@ func binaryOp(operator string, left, right any) (any, error) {
 			}
 			return normalizeInt(remainder), nil
 		default:
-			return nil, fmt.Errorf("Unsupported operator: %s", operator)
+			return nil, &VMError{Message: fmt.Sprintf("Unsupported operator: %s", operator)}
 		}
 		return normalizeInt(result), nil
 	}
@@ -417,7 +453,7 @@ func binaryOp(operator string, left, right any) (any, error) {
 	leftFloat, leftOK := toFloat(left)
 	rightFloat, rightOK := toFloat(right)
 	if !leftOK || !rightOK {
-		return nil, fmt.Errorf("Unsupported operand types for %s: %T and %T", operator, left, right)
+		return nil, &TypeError{Message: fmt.Sprintf("Unsupported operand types for %s: %T and %T", operator, left, right)}
 	}
 	switch operator {
 	case "+":
@@ -428,13 +464,13 @@ func binaryOp(operator string, left, right any) (any, error) {
 		return leftFloat * rightFloat, nil
 	case "/":
 		if rightFloat == 0 {
-			return nil, fmt.Errorf("Division by zero")
+			return nil, &VMError{Message: "Division by zero"}
 		}
 		return leftFloat / rightFloat, nil
 	case "%":
 		return pythonModFloat(leftFloat, rightFloat)
 	default:
-		return nil, fmt.Errorf("Unsupported operator: %s", operator)
+		return nil, &VMError{Message: fmt.Sprintf("Unsupported operator: %s", operator)}
 	}
 }
 
@@ -575,7 +611,7 @@ func (virtualMachine *VM) compareOp(operation string) error {
 
 	order, err := valuesOrder(left, right)
 	if err != nil {
-		return &VMError{Message: err.Error()}
+		return &TypeError{Message: err.Error()}
 	}
 	switch operation {
 	case "lt":
@@ -739,6 +775,9 @@ func (virtualMachine *VM) listAppend() error {
 	if !ok {
 		return vmErrorf("%v is not a list", key)
 	}
+	if virtualMachine.MaxCollectionItems > 0 && len(list) >= virtualMachine.MaxCollectionItems {
+		return vmErrorf("List %v exceeds %d items", key, virtualMachine.MaxCollectionItems)
+	}
 	list = append(list, value)
 	virtualMachine.Storage.SetVar(key, list)
 	return nil
@@ -759,6 +798,14 @@ func (virtualMachine *VM) listRemove() error {
 	list, ok := virtualMachine.Storage.GetVar(key).([]any)
 	if !ok {
 		return vmErrorf("%v is not a list", key)
+	}
+	// The scan is O(len(list)); charge for very large lists so a big list
+	// cannot be searched for the flat 25 gas cost. Lists below the threshold
+	// keep the exact Python gas schedule.
+	if len(list) > collectionWordThreshold {
+		if err := virtualMachine.charge(len(list) / 1024); err != nil {
+			return err
+		}
 	}
 	for index, item := range list {
 		if valuesEqual(item, value) {
@@ -833,6 +880,9 @@ func (virtualMachine *VM) dictSet() error {
 		}
 		position := index.Int64()
 		if position == int64(len(typed)) {
+			if virtualMachine.MaxCollectionItems > 0 && len(typed) >= virtualMachine.MaxCollectionItems {
+				return vmErrorf("List %v exceeds %d items", dictName, virtualMachine.MaxCollectionItems)
+			}
 			typed = append(typed, value)
 		} else {
 			typed[position] = value
@@ -883,6 +933,12 @@ func (virtualMachine *VM) dictKeys() error {
 	dictionary, ok := virtualMachine.Storage.GetVar(dictName).(map[string]any)
 	if !ok {
 		return vmErrorf("%v is not a dict", dictName)
+	}
+	// Sorting is O(n log n); charge for very large dicts only.
+	if len(dictionary) > collectionWordThreshold {
+		if err := virtualMachine.charge(len(dictionary) / 1024); err != nil {
+			return err
+		}
 	}
 	names := make([]string, 0, len(dictionary))
 	for key := range dictionary {

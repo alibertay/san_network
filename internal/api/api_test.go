@@ -410,7 +410,9 @@ func TestMetricsEndpoint(t *testing.T) {
 	if contentType := recorder.Header().Get("Content-Type"); contentType != "text/plain; version=0.0.4; charset=utf-8" {
 		t.Errorf("content type: got %q", contentType)
 	}
-	if got, want := recorder.Body.String(), api.RenderMetrics(node.MetricsSnapshot()); got != want {
+	snapshot := node.MetricsSnapshot()
+	snapshot["http_body_rejected"] = api.BodyLimitRejections()
+	if got, want := recorder.Body.String(), api.RenderMetrics(snapshot); got != want {
 		t.Errorf("metrics text mismatch:\n got %q\nwant %q", got, want)
 	}
 	if !strings.Contains(recorder.Body.String(), "san_height 0") {

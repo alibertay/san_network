@@ -54,6 +54,7 @@ func (n *Node) bufferOrphan(block *ledger.Block) {
 			break
 		}
 		delete(n.orphans, oldest.CurrentBlockHash)
+		n.incMetric("orphans_evicted")
 		if oldest.CurrentBlockHash == block.CurrentBlockHash {
 			break
 		}

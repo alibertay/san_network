@@ -139,6 +139,31 @@ func TestVMNeverPanicsOnArbitraryBytecode(t *testing.T) {
 	}
 }
 
+func TestMixedTypeComparisonsNeverPanic(t *testing.T) {
+	// Fuzzer regression (seed 36c112d8fc0ef853): EQ/GT against a non-numeric
+	// operand used to call big.Int.Cmp on a nil pointer.
+	guardNoPanic(t, "mixed compare", func() {
+		guardNoPanic(t, "EQ(0, string)", func() { _ = valuesEqual(int64(0), "hello") })
+		guardNoPanic(t, "EQ(string, 0)", func() { _ = valuesEqual("hello", int64(0)) })
+		guardNoPanic(t, "EQ(nil, 0)", func() { _ = valuesEqual(nil, int64(0)) })
+		guardNoPanic(t, "EQ(list, 1)", func() { _ = valuesEqual([]any{int64(1)}, int64(1)) })
+	})
+	virtualMachine := NewVM(NewStorage())
+	virtualMachine.Verbose = false
+	err := virtualMachine.Execute([]any{
+		int(OpMul), int(OpMul),
+		int(OpPush), "hello",
+		int(OpGt),
+		int(OpHalt),
+	})
+	if err == nil {
+		t.Fatalf("mixed comparison unexpectedly succeeded")
+	}
+	if _, ok := err.(*TypeError); !ok {
+		t.Fatalf("mixed comparison error type %T, want *TypeError", err)
+	}
+}
+
 func FuzzAssemble(f *testing.F) {
 	seeds := []string{
 		"PUSH 1\nHALT",

@@ -137,6 +137,7 @@ func readObjectBody(w http.ResponseWriter, r *http.Request) (map[string]any, boo
 	if err != nil {
 		var tooLarge *http.MaxBytesError
 		if errors.As(err, &tooLarge) {
+			bodyLimitRejections.Add(1)
 			writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
 			return nil, false
 		}

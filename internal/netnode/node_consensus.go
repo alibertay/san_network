@@ -241,6 +241,7 @@ func (n *Node) broadcastVote(vote map[string]any) {
 	n.seenVotes[key] = struct{}{}
 	if len(n.seenVotes) > 8192 {
 		n.seenVotes = map[string]struct{}{key: {}}
+		n.incMetric("vote_seen_cache_resets")
 	}
 	peers := append([]map[string]any{}, n.PEERS...)
 	n.mu.Unlock()
@@ -331,6 +332,7 @@ func (n *Node) handleFinalityVote(vote any) {
 		if staged == nil {
 			if len(heightVotes) >= 8 || n.stagedHashCount() >= VoteLookahead*4 {
 				n.mu.Unlock()
+				n.incMetric("staged_votes_rejected")
 				n.incMetric("votes_dropped_height")
 				return
 			}
@@ -389,6 +391,7 @@ func (n *Node) handleFinalityVote(vote any) {
 	}
 	if len(staged) >= MaxStagedVotersPerHash {
 		n.mu.Unlock()
+		n.incMetric("staged_votes_rejected")
 		n.incMetric("votes_dropped_height")
 		return
 	}
@@ -708,6 +711,7 @@ func (n *Node) validateTransactionForMempool(transaction *ledger.Transaction) er
 	if n.config.MaxMempool > 0 && len(n.transactionPool) >= n.config.MaxMempool {
 		n.prunePool()
 		if len(n.transactionPool) >= n.config.MaxMempool {
+			n.incMetric("mempool_rejected")
 			return fmt.Errorf("mempool is full (%d transactions)", len(n.transactionPool))
 		}
 	}

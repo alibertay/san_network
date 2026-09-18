@@ -5,11 +5,20 @@ import (
 	"net/http"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 // maxTrackedClients mirrors app/limits.py MAX_TRACKED_CLIENTS.
 const maxTrackedClients = 10_000
+
+// bodyLimitRejections counts every request rejected for exceeding the body
+// cap, on the Content-Length gate and on the read-side MaxBytesReader cap.
+var bodyLimitRejections atomic.Int64
+
+// BodyLimitRejections returns the process-wide count of rejected oversized
+// request bodies (Go-only resource-limit metric).
+func BodyLimitRejections() int64 { return bodyLimitRejections.Load() }
 
 // rateLimiter is the Go port of RateLimitMiddleware: a token-free sliding
 // window limiter per client IP plus a Content-Length body gate. Like the
@@ -66,6 +75,7 @@ func (l *rateLimiter) wrap(next http.Handler) http.Handler {
 				return
 			}
 			if int64(parsed) > l.maxBody {
+				bodyLimitRejections.Add(1)
 				writeError(w, http.StatusRequestEntityTooLarge, "request body too large")
 				return
 			}

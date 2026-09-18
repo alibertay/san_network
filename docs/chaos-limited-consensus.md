@@ -812,4 +812,68 @@ against each other while writing this document. Differences worth knowing:
   them). None of this changes the wire rules or block validity; it only
   removes guessing and re-fetch delays on the Go node.
 
+---
+
+## 10. SANVM gas and collection hardening (Batch C)
+
+This section records the resource bounds added to the Go SANVM/PENA
+implementation (`internal/sanvm`, mirrored by `SANVM/` where noted) and the
+intentional Go/Python differences.
+
+### 10.1 Existing schedule and limits
+
+* Every opcode has a fixed cost (`GasCosts`); `PUSH` payloads are priced by
+  canonical byte size (16 bytes per gas).
+* Integer arithmetic is priced by operand width
+  (`max(bit_length(a), bit_length(b)) / 64` extra gas), so repeated squaring
+  cannot burn CPU for the base opcode cost.
+* A stack value may not exceed `MaxValueBytes = 65,536` serialized bytes or
+  `MaxIntBits = 4096` bits.
+* `DefaultMaxSteps = 100,000`, `DefaultMaxStack = 1,024`,
+  `DefaultMaxCallDepth = 64`, and an optional gas limit bound every run.
+
+### 10.2 Batch C additions (Go-only guards)
+
+* `MaxCollectionItems = 65,536`: stored lists and list-backed dicts cannot
+  grow past this item count. Python has no document-level cap; the Go node
+  rejects the operation with `VMError("... exceeds 65536 items")`.
+* `LIST_REMOVE` charges an extra `len(list) / 1024` gas above 1,024 items;
+  `DICT_KEYS` charges an extra `len(dict) / 1024` gas above 1,024 entries.
+  Below those thresholds the gas schedule is byte-for-byte the Python
+  schedule, so normal contracts are unaffected.
+* Python's `str * int` and `list * int` repetition is now implemented in Go
+  (previously it failed with an operand-type error). Results that would exceed
+  `MaxValueBytes` are rejected before allocating memory.
+
+### 10.3 Differential parity fuzzer and known deviations
+
+`internal/parity/differential_fuzz_test.go` generates deterministic SANVM
+programs (arithmetic, stack ops, control flow, storage, lists/dicts, function
+calls, gas/step limits, extreme integers) and executes each on the Go VM and
+the Python reference VM, comparing final storage, stack, logs, gas used, error
+type and error timing (`steps`/`pc`). Run it with `SAN_PARITY_CASES=N`
+(default 128, `-short` skips; long runs use thousands) and
+`SAN_PARITY_SEED`. Mismatches are written to
+`internal/parity/testdata/parity_regression_*.json` and replayed by
+`TestParityRegressionFixtures`.
+
+Intentional deviations kept in the comparator:
+
+* **`DICT_KEYS` order**: Go returns sorted keys, Python returns insertion
+  order. Cases that observe key order are compared with string-list order
+  relaxed. This is a documented deviation, not a consensus change (both nodes
+  run the same implementation on a chain).
+* **Operand-type failures**: Python raises `TypeError`; Go mirrors the name
+  with `sanvm.TypeError` (division/modulo by zero stay `VMError` in both).
+* **Hardening rejections**: the Go-only collection cap and superlinear charges
+  above 1,024 items fire only on programs Python would run for a long
+  time/with unbounded memory.
+
+Fuzzing (10-30 s per target) found and fixed a real panic: comparing a number
+with a non-numeric value called `big.Int.Cmp` on a nil pointer, crashing the
+node on hostile contract bytecode. Regression test:
+`TestMixedTypeComparisonsNeverPanic` plus the retained fuzz seed
+`internal/sanvm/testdata/fuzz/FuzzVM/36c112d8fc0ef853`.
+
+
 

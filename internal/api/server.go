@@ -280,9 +280,11 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	if node == nil {
 		return
 	}
+	snapshot := node.MetricsSnapshot()
+	snapshot["http_body_rejected"] = BodyLimitRejections()
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	w.WriteHeader(http.StatusOK)
-	_, _ = io.WriteString(w, RenderMetrics(node.MetricsSnapshot()))
+	_, _ = io.WriteString(w, RenderMetrics(snapshot))
 }
 
 func (s *Server) handleAccount(w http.ResponseWriter, r *http.Request) {

@@ -217,6 +217,7 @@ func (n *Node) addPeerFrom(raw any, source string) int {
 	}
 	if len(n.PEERS) >= n.config.MaxPeers {
 		log.Printf("Peer limit reached (%d); ignoring %s", n.config.MaxPeers, PeerLabel(record))
+		n.incMetric("peers_rejected_table")
 		return 0
 	}
 	n.PEERS = append(n.PEERS, record)

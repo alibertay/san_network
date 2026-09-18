@@ -8,10 +8,53 @@ import (
 	"fmt"
 	"math"
 	"math/big"
+	"strings"
 )
 
 // MaxIntBits caps integers on the stack (audit fix parity with Python).
 const MaxIntBits = 4096
+
+// TypeError marks an operand type failure. Python raises TypeError from the
+// underlying operators; Go mirrors the error name so Go/Python error
+// classification stays identical (section 15 parity).
+type TypeError struct{ Message string }
+
+func (e *TypeError) Error() string { return e.Message }
+
+// repetitionCount converts a stack value into a Python slice repetition count.
+func repetitionCount(value any) (int64, bool) {
+	number, ok := toBig(value)
+	if !ok || !number.IsInt64() {
+		return 0, false
+	}
+	return number.Int64(), true
+}
+
+// repeatString mirrors Python's str * int (negative counts yield "").
+func repeatString(text string, count int64) (any, error) {
+	if count <= 0 {
+		return "", nil
+	}
+	if int64(len(text))*count > MaxValueBytes {
+		return nil, &VMError{Message: fmt.Sprintf("Value exceeds %d bytes", MaxValueBytes)}
+	}
+	return strings.Repeat(text, int(count)), nil
+}
+
+// repeatList mirrors Python's list * int (negative counts yield []).
+func repeatList(list []any, count int64) (any, error) {
+	if count <= 0 {
+		return []any{}, nil
+	}
+	if int64(len(list))*count > MaxValueBytes {
+		return nil, &VMError{Message: fmt.Sprintf("Value exceeds %d bytes", MaxValueBytes)}
+	}
+	repeated := make([]any, 0, int(int64(len(list))*count))
+	for i := int64(0); i < count; i++ {
+		repeated = append(repeated, list...)
+	}
+	return repeated, nil
+}
 
 // deepCopy mirrors copy.deepcopy for container values.
 func deepCopy(value any) any {
@@ -202,7 +245,7 @@ func valuesEqual(a, b any) bool {
 }
 
 func bothNumeric(a, b any) bool {
-	return isInteger(a) || isFloat(a)
+	return (isInteger(a) || isFloat(a)) && (isInteger(b) || isFloat(b))
 }
 
 func isFloat(value any) bool {
@@ -217,8 +260,13 @@ func isFloat(value any) bool {
 // compareNumbers returns -1/0/1 for two numeric values (exact for ints).
 func compareNumbers(a, b any) int {
 	if !isFloat(a) && !isFloat(b) {
-		left, _ := toBig(a)
-		right, _ := toBig(b)
+		left, leftOK := toBig(a)
+		right, rightOK := toBig(b)
+		if !leftOK || !rightOK {
+			// Defensive: mixed or unsupported values are unordered, never a
+			// nil-pointer dereference (fuzzer regression).
+			return 2
+		}
 		return left.Cmp(right)
 	}
 	left, _ := toFloat(a)
@@ -239,7 +287,7 @@ func compareNumbers(a, b any) int {
 
 func pythonModInt(a, b *big.Int) (*big.Int, error) {
 	if b.Sign() == 0 {
-		return nil, fmt.Errorf("Modulo by zero")
+		return nil, &VMError{Message: "Modulo by zero"}
 	}
 	remainder := new(big.Int)
 	quotient := new(big.Int)
@@ -252,7 +300,7 @@ func pythonModInt(a, b *big.Int) (*big.Int, error) {
 
 func pythonFloorDivInt(a, b *big.Int) (*big.Int, error) {
 	if b.Sign() == 0 {
-		return nil, fmt.Errorf("Division by zero")
+		return nil, &VMError{Message: "Division by zero"}
 	}
 	quotient := new(big.Int)
 	remainder := new(big.Int)
@@ -265,7 +313,7 @@ func pythonFloorDivInt(a, b *big.Int) (*big.Int, error) {
 
 func pythonModFloat(a, b float64) (float64, error) {
 	if b == 0 {
-		return 0, fmt.Errorf("Modulo by zero")
+		return 0, &VMError{Message: "Modulo by zero"}
 	}
 	remainder := math.Mod(a, b)
 	if remainder != 0 && (remainder < 0) != (b < 0) {

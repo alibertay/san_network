@@ -378,6 +378,15 @@ sanup --data-dir /var/lib/san --stop      # SIGTERM, wait up to 15s, then SIGKIL
 sudo bash deploy/install.sh --uninstall        # keep data; add --purge to remove it
 ```
 
+**Backup and restore:** stop the node (SIGTERM + wait), then
+`sanbackup backup --data /var/lib/san --out /var/backups/san-<date>`; restore
+with `sanbackup restore --in <backup> --data /var/lib/san` and verify with
+`sanbackup validate --data /var/lib/san`. The identity key is the only
+irreplaceable file; peer resynchronization is the fallback. Full runbook:
+[docs/backup-restore.md](docs/backup-restore.md). Database/protocol schema
+upgrades and the backup-before-upgrade rule:
+[docs/storage-migration.md](docs/storage-migration.md).
+
 **Faucet (optional):** set `SAN_FAUCET=1` (plus `SAN_FAUCET_AMOUNT`,
 `SAN_FAUCET_MAX`, `SAN_FAUCET_COOLDOWN`) in `san.env`, or start with
 `sanup --faucet --faucet-amount 10 --faucet-max 100 --faucet-cooldown 60`.

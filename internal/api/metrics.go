@@ -36,6 +36,15 @@ var counterNames = []string{
 	"peer_malformed_messages",
 	"peer_rate_limit_hits",
 	"peer_invalid_records",
+	// Batch C resource-limit rejections (Go-only, appended so the Python
+	// parity prefix above is unchanged).
+	"mempool_rejected",
+	"orphans_evicted",
+	"block_requests_rejected",
+	"staged_votes_rejected",
+	"peers_rejected_table",
+	"vote_seen_cache_resets",
+	"http_body_rejected",
 }
 
 var gaugeNames = []string{

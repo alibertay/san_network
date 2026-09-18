@@ -25,7 +25,7 @@ must be resolved before announcing the devnet.
 - [x] Partition scenarios A-D automated (5/5, 7/3, proposer isolation, full split)
 - [ ] Long-running soak test (`cmd/sansoak`) passes for the agreed duration
 - [x] Fork-choice torture suite (randomized branches, delayed parents)
-- [ ] Crash-consistency tests (kill during commit/finality/prune) pass
+- [x] Crash-consistency tests (kill during commit/finality/prune) pass
 - [x] Validator churn suite (join, undelegate, withdraw, slash) passes
 - [x] Finality stress suite (out-of-order, duplicate, conflicting votes) passes
 - [x] Mixed Go/Python implementation policy documented and enforced in code
@@ -36,8 +36,8 @@ must be resolved before announcing the devnet.
 - [x] Snapshot save/load and mismatch pruning covered by tests
 - [x] Restart-and-catch-up path exercised (`wide_area_test`, `sane2e`)
 - [ ] Backup/restore runbook executed on a VPS-style install
-- [ ] Database schema-version refusal path tested against a newer fixture
-- [ ] Explicit migration policy documented and linked from `INSTALL.md`
+- [x] Database schema-version refusal path tested against a newer fixture
+- [x] Explicit migration policy documented and linked from `INSTALL.md`
 
 ## Configuration and secrets
 
@@ -113,7 +113,50 @@ until the corresponding work lands.
 - **Limited production history.** No long-running public deployment yet; crash
   and partition behavior is covered by tests, not by years of operation.
 - **SANVM and PENA are experimental.** Gas metering, limits and fuzzing exist,
-  but the VM and language have not been externally audited.
+  but the VM and language have not been externally audited. Batch C added
+  Go-only collection caps (`MaxCollectionItems`), superlinear charging above
+  1,024 items for `LIST_REMOVE`/`DICT_KEYS`, and Python `str/list * int`
+  repetition. The one documented order deviation is `DICT_KEYS` (Go sorted vs
+  Python insertion order; whitelisted in the differential comparator). Fuzz
+  targets `FuzzParser`, `FuzzAssembler`, `FuzzVM`, `FuzzVMBytecode`,
+  `FuzzContract` plus the retained seed
+  `internal/sanvm/testdata/fuzz/FuzzVM/36c112d8fc0ef853` cover the parser,
+  assembler, bytecode and contract paths; a CI fuzz smoke job is still
+  outstanding. Regression tests: `TestMixedTypeComparisonsNeverPanic`,
+  `TestCollectionItemCapRejectsCleanly`,
+  `TestListRemoveScanIsPricedForLargeLists`,
+  `TestDictKeysOrderDeviationIsWhitelisted`.
+- **Go/Python VM differential coverage is bytecode-level only.** The section 15
+  fuzzer (`internal/parity/differential_fuzz_test.go`) generates bytecode
+  programs and compares stack/logs/storage/gas/error type/timing against the
+  Python VM; it does not run whole contracts through both nodes. Intentional
+  deviations are whitelisted and documented in
+  `docs/chaos-limited-consensus.md` section 10. Regression tests:
+  `TestDifferentialFuzzGoPythonVM`, `TestDictKeysOrderDeviationIsWhitelisted`,
+  `TestParityRegressionFixtures`.
+- **Crash consistency has two coverage levels.** In-process fault injection
+  (`internal/ledger/crash_consistency_test.go`, memory backend) runs on every
+  platform; the real SIGKILL/process-kill harness
+  (`TestLMDBProcessKillConsistency`) requires `-tags lmdb` and runs in WSL/Linux
+  (`CGO_ENABLED=1`). The LMDB path was exercised, but a longer soak on real
+  hardware is still advisable.
+- **Backup tooling is offline-only.** `sanbackup`
+  (`internal/backup`, `cmd/sanbackup`) requires the node to be stopped
+  (SIGTERM + wait) before `backup`; there is no live-snapshot path. Restore
+  validates the canonical chain, state root and finality checkpoint. Tests:
+  `TestBackupRestoreRoundTrip`, `TestRestoreDetectsTampering`,
+  `TestValidateStoreDetectsStateRootMismatch`.
+- **New resource-limit counters are Go-only metrics** appended after the
+  Python-parity prefix (`mempool_rejected`, `orphans_evicted`,
+  `block_requests_rejected`, `staged_votes_rejected`, `peers_rejected_table`,
+  `vote_seen_cache_resets`, `http_body_rejected`); a Python node's `/metrics`
+  does not expose them. The full section 13 audit (per-structure bound,
+  configurable knob, counter and residual uncapped paths: total contract
+  storage, logs per tx, txs per block) is in
+  [docs/resource-limits.md](resource-limits.md). Regression tests: `TestMempoolLimitRejectsAndCounts`,
+  `TestOrphanLimitEvictsAndCounts`, `TestBlockRequestLimitRejectsAndCounts`,
+  `TestStagedVoteHashCapRejectsAndCounts`, `TestPeerTableLimitRejectsAndCounts`,
+  `TestSeenVoteCacheStaysBounded`.
 - **TLS trust equals genesis trust.** Without TLS (or with a shared devnet CA),
   a network-level attacker could serve a different genesis to a joining node.
 - **Mixed-implementation policy.** Python remains the reference and fixture

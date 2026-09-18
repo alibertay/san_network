@@ -27,7 +27,10 @@ high-level **PENA** language.
   computes the same fee.
 - **Gas Metering**: every opcode has a fixed cost; contracts that loop or read
   state pay for it, and out-of-gas executions are rolled back while the
-  escrow is burned — no free compute.
+  escrow is burned — no free compute. Arithmetic is priced by operand size,
+  values are capped at 64 KiB and 4096-bit integers, stored collections are
+  capped, and the gas schedule plus the Go/Python deviations are documented in
+  `docs/chaos-limited-consensus.md`.
 - **Mempool Gossip**: accepted transactions propagate to peers over the P2P
   layer (not just the submitting node's API), with signature/nonce/balance
   validation on every hop and deduplication by transaction id.

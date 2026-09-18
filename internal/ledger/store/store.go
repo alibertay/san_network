@@ -41,6 +41,24 @@ func (batch *WriteBatch) Delete(key []byte) {
 // Len returns the number of staged operations.
 func (batch *WriteBatch) Len() int { return len(batch.ops) }
 
+// Op is a read-only view of one staged batch operation (tests, migration
+// tooling and fault-injecting wrappers).
+type Op struct {
+	Key    []byte
+	Value  []byte
+	Delete bool
+}
+
+// ExportOps returns a copy of the staged operations in order. The slices share
+// the batch's backing arrays; callers must not mutate them.
+func (batch *WriteBatch) ExportOps() []Op {
+	ops := make([]Op, len(batch.ops))
+	for index, staged := range batch.ops {
+		ops[index] = Op{Key: staged.key, Value: staged.value, Delete: staged.delete}
+	}
+	return ops
+}
+
 // Pair is a key/value entry returned by iterators.
 type Pair struct {
 	Key   []byte
