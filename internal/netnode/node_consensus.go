@@ -219,6 +219,17 @@ func sortedVoteHeights(input map[int64]map[string]map[string]map[string]any) []i
 	return keys
 }
 
+// sortedVoteHashes orders competing hashes at one height so evidence
+// selection is identical on every run.
+func sortedVoteHashes(input map[string]map[string]map[string]any) []string {
+	keys := make([]string, 0, len(input))
+	for key := range input {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	return keys
+}
+
 // broadcastVote deduplicates and gossips a finality vote.
 func (n *Node) broadcastVote(vote map[string]any) {
 	key := fmt.Sprintf("%v:%v:%v", vote["height"], vote["block_hash"], vote["public_key"])
@@ -305,11 +316,11 @@ func (n *Node) handleFinalityVote(vote any) {
 			return
 		}
 		heightVotes := n.finalityVotes[height]
-		for otherHash, voters := range heightVotes {
+		for _, otherHash := range sortedVoteHashes(heightVotes) {
 			if otherHash == blockHash {
 				continue
 			}
-			if previous, present := voters[address]; present {
+			if previous, present := heightVotes[otherHash][address]; present {
 				n.recordEvidence(address, height, previous, v)
 				n.mu.Unlock()
 				n.incMetric("votes_dropped_equivocation")
@@ -347,11 +358,11 @@ func (n *Node) handleFinalityVote(vote any) {
 	}
 
 	heightVotes := n.finalityVotes[height]
-	for otherHash, voters := range heightVotes {
+	for _, otherHash := range sortedVoteHashes(heightVotes) {
 		if otherHash == blockHash {
 			continue
 		}
-		if previous, present := voters[address]; present {
+		if previous, present := heightVotes[otherHash][address]; present {
 			n.recordEvidence(address, height, previous, v)
 			n.mu.Unlock()
 			n.incMetric("votes_dropped_equivocation")

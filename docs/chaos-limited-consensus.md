@@ -75,13 +75,16 @@ key whose address is expected. See [section 2](#2-proposer-selection-and-rounds)
 
 Before a locally produced block is committed and gossiped, the producing node
 asks its **controller set** for signed votes
-(`sendToControllers`, `internal/netnode/node_sync.go:489`;
+(`sendToControllers`, `internal/netnode/node_sync.go:513`;
 `Node.send_to_controllers`, `network/Node.py:2439`):
 
 * Each controller runs the full `verify_block` and answers with a signed
   `BLOCK_VOTE_RESPONSE` (over chain id, approved flag and block hash).
 * Approval requires `approvals / len(controllers) >= 0.66`, i.e. at least 66%
   of the set asked.
+* Records are deduplicated before asking: a repeated record, or several
+  addresses advertising the same `public_key`, counts once, so one signing key
+  cannot inflate the quorum.
 * With an empty controller set the block is accepted locally (bootstrap /
   single-node mode).
 
@@ -159,7 +162,7 @@ still at least 16.
 ### 2.3 A block must claim a justified round
 
 `verify_block` rejects a block whose `round` is not justified by its own
-timestamp (`internal/netnode/node_state.go:440`;
+timestamp (`internal/netnode/node_state.go:419`;
 `network/Node.py:1161`):
 
 * `round < 0 || round >= capRounds` -> reject;
@@ -208,7 +211,7 @@ Notes:
 
 ### 2.5 Producing a block
 
-`maybeProduceFromPool` (`internal/netnode/node_consensus.go:860`;
+`maybeProduceFromPool` (`internal/netnode/node_consensus.go:881`;
 `Node._maybe_produce_from_pool`, `network/Node.py:2710`) runs from the block
 production loop every `clamp(proposer_timeout, 0.5s, 2.0s)` and on every new
 mempool transaction:
@@ -226,7 +229,7 @@ mempool transaction:
 5. Build the block, ask controllers (it is gossiped as soon as the quorum is
    reached, before the local commit), commit, vote.
 
-`buildBlock` (`node_consensus.go:808`) computes
+`buildBlock` (`node_consensus.go:829`) computes
 `minimum_timestamp = tip.timestamp + min_block_interval`, upgrades it to
 `tip.timestamp + round * proposer_timeout * 0.8` for `round > 0`, and uses
 `max(now, minimum_timestamp)`. It simulates the block on state copies to
@@ -236,7 +239,7 @@ predict `state_root`, then signs the header hash.
 
 ## 3. Block validity rules
 
-`verifyBlock` (`internal/netnode/node_state.go:393`;
+`verifyBlock` (`internal/netnode/node_state.go:419`;
 `Node.verify_block`, `network/Node.py:1093`) runs on every accepted block
 (live, sync replay with `historical=true`, and reorg replay). The same checks
 are re-run during execution (`simulateBlock`), so a block cannot be accepted
@@ -273,7 +276,7 @@ and the round derivation are reproducible across implementations.
 ### 3.2 Transactions
 
 Each transaction inside a block is re-validated (`simulateBlock`,
-`internal/netnode/node_state.go:487`; `Node._simulate_block`,
+`internal/netnode/node_state.go:517`; `Node._simulate_block`,
 `network/Node.py:1239`):
 
 * `chain_id` matches, `sender` is a valid public key, `signature` verifies
@@ -349,7 +352,7 @@ header:
   is used;
 * the producer sets it from `SAN_REWARD_ADDRESS`, falling back to its own
   address (`buildBlock` / `validatorRewardAddress`,
-  `internal/netnode/node_state.go:1187`);
+  `internal/netnode/node_state.go:1217`);
 * if `validator` is empty, no reward is credited at all.
 
 This makes the destination identical on every node: the block signature
@@ -375,13 +378,13 @@ the canonical chain.
 * A vote is canonical JSON plus a hex signature:
   `{chain_id, public_key, height, block_hash, timestamp, signature}`;
   the signature covers everything except `signature`
-  (`votePayload`, `node_state.go:791`).
-* `handleFinalityVote` (`node_consensus.go:261`) verifies chain id, size,
+  (`votePayload`, `node_state.go:821`).
+* `handleFinalityVote` (`node_consensus.go:272`) verifies chain id, size,
   height, hash and signature, then either stages it (if the height has no
   frozen weight set yet) or tallies it against the frozen set.
 * Valid commits freeze the voting weights first:
   `finalitySets[height] = active_validators_for(height)`
-  (`commitBlock`, `node_state.go:1020`). Staking changes later cannot
+  (`commitBlock`, `node_state.go:1050`). Staking changes later cannot
   re-weight an old height.
 * `rebroadcastOwnVotes` re-sends a node's own not-yet-finalized votes in the
   window `height > max(finalized - 8, tip - 64, 0)` on each health-check
@@ -404,7 +407,7 @@ height records evidence (see 4.5).
 
 ### 4.3 The 2/3 threshold
 
-`tallyFinality` (`node_consensus.go:420`; `Node._tally_finality`,
+`tallyFinality` (`node_consensus.go:431`; `Node._tally_finality`,
 `network/Node.py:1761`):
 
 ```
@@ -423,18 +426,21 @@ one.
 
 ### 4.4 Persistence and attestations
 
-* `persistFinality` (`node_state.go:318`) writes the checkpoint plus the
+* `persistFinality` (`node_state.go:344`) writes the checkpoint plus the
   frozen sets and staged votes for the last 256 heights to database metadata
   (`finality_state`, `finalized_height`, `finalized_hash`).
-* On restart, `loadFinalityState` restores sets/votes and adopts the
-  checkpoint only when the block at that height still has the stored hash.
-* `AttestationState` (`node_consensus.go:478`) backs `/validators`
+* On restart, `loadFinalityState` restores sets/votes and checks the
+  checkpoint against the store's canonical index. Pruning never removes the
+  block at the finalized height, so a checkpoint whose block is missing or
+  hashes differently is a **fatal startup error** (`refusing to start`)
+  instead of a guess; finality is monotone and can never be rolled back.
+* `AttestationState` (`node_consensus.go:489`) backs `/validators`
   (finalized height/hash, validator list with stake, total stake,
   `min_stake_units`, `unbonding_period`, `slash_bps`, `base_fee`,
   `total_burned` and the full parameter map). `/finality` returns the chain
   id, tip height/hash, finalized height/hash and the pending vote heights
   (`handleFinality`, `internal/api/server.go:132`).
-* `/snapshot` (`FinalizedSnapshot`, `node.go:733`) serves a snapshot only if
+* `/snapshot` (`FinalizedSnapshot`, `node.go:757`) serves a snapshot only if
   its height is `<= finalized_height` and its hash matches the canonical
   block; a snapshot from a discarded branch is never served.
 
@@ -445,14 +451,14 @@ at one height, `recordEvidence` stores
 `{offender, height, vote_a, vote_b}` (bounded to 256 entries) and the node
 gossips the vote onward. The evidence is also included in a later
 `validator: {command: "evidence", vote_a, vote_b}` transaction, which is
-validated (`verifyEquivocation`, `node_state.go:795`):
+validated (`verifyEquivocation`, `node_state.go:825`):
 
 * both votes carry the same public key, same height, different non-empty
   hashes, matching chain id, and both signatures verify;
 * the offender must have a validator record (a validator that is unbonding
   still qualifies, because `release_height` is not checked here).
 
-On success (`applyValidatorCommand`, `node_state.go:761`):
+On success (`applyValidatorCommand`, `node_state.go:742`):
 
 ```
 burned    = stake * slash_bps / 10000        # default 5000 bps = 50%
@@ -512,7 +518,7 @@ The parameter table is identical in Go and Python
 | `block_reward` | 0 | none | 0 (devnet scripts use 2 SAN) | per-block subsidy in base units |
 | `min_block_interval_ms` | 0 | 600,000 | 0 | minimum ms between blocks; a subsidy chain always enforces at least 1 s |
 
-Rules (`applyGovernanceCommand`, `internal/netnode/node_state.go:836`;
+Rules (`applyGovernanceCommand`, `internal/netnode/node_state.go:866`;
 `Node._apply_governance_command`, `network/Node.py:1915`):
 
 * the transaction may carry exactly one `governance: {command: "set_param",
@@ -542,7 +548,7 @@ Fork handling is in `internal/netnode/node_fork.go` (Python:
 
 ### 6.1 Incoming block paths
 
-`processIncomingBlock` (Go `node_fork.go:75`) classifies a block:
+`processIncomingBlock` (Go `node_fork.go:92`) classifies a block:
 
 1. Already known (`chainHashes`) -> ignored.
 2. `previous_block_hash == tip.hash`: full `verifyBlock` + `commitBlock`;
@@ -561,13 +567,17 @@ parent becomes the tip.
 ### 6.2 Longest fully verified chain
 
 `bestOrphanChain` walks each orphan's parent chain back to a known ancestor
-and builds the candidate chain. `tryReorg` only switches when the candidate
-is **strictly longer** (`len(candidate) > len(current)`), i.e. longest-chain
-with finality as a floor:
+and builds the candidate chain. Orphans are visited, connected and evicted in
+sorted-hash order and equal-length candidates are broken by the smaller tip
+hash, so fork choice is reproducible regardless of Go map iteration order.
+`tryReorg` only switches when the candidate is **strictly longer**
+(`len(candidate) > len(current)`), i.e. longest-chain with finality as a
+floor:
 
 * **finality guard**: if `finalized_height > 0`, a candidate shorter than
   finality or one whose block at the finalized height has a different hash is
-  rejected ("finalized history can never be rewritten");
+  rejected ("finalized history can never be rewritten"). The checkpoint is
+  addressed by absolute height, so the guard also works on a pruned window;
 * the candidate is replayed: `captureState` snapshots chain, balances, nonces,
   validators, parameters, storage, chain hashes, finality sets/votes and
   receipts; `replayChain` re-runs `verifyBlock` + `simulateBlock` for every
@@ -578,6 +588,9 @@ with finality as a floor:
   chain are pushed back into the mempool by `requeueTransactions`, which
   re-validates them against the new tip (nonce, fee at the new fee rate,
   balance) and then prunes the pool;
+* the replaced branch's blocks are retained in the orphan buffer (bounded by
+  `max_orphans`), so a later, longer branch descending from them is assembled
+  without waiting for a re-fetch;
 * `persistFinality` runs, snapshots that do not match the new canonical
   hashes are deleted, and stray orphans are dropped.
 
@@ -637,6 +650,10 @@ derived from chain data with a canonical encoding.
   chain id + height + round + sorted active set; finality weights from the
   frozen eligible set at commit; controller selection from the epoch and
   peer public keys.
+* **Fork-choice order**: orphan traversal, orphan eviction and equal-length
+  tie-breaks are sorted by hash, so a reorg decision never depends on Go map
+  iteration order; state entries, validator lists and approvals are ordered
+  the same way.
 
 Two honest nodes with the same chain data therefore compute the same hash,
 the same state root, the same proposer and the same voting weights, and
@@ -776,3 +793,11 @@ against each other while writing this document. Differences worth knowing:
 * **No finality vote gossip over a dedicated port**: votes travel on the
   peer port as `FINALITY_VOTE` messages; the controller port is only used for
   `BLOCK_VOTE_REQUEST`/`BLOCK_VOTE_RESPONSE`.
+* **Stricter Go persistence/fork behavior**: the Go node refuses to start when
+  the persisted finality checkpoint contradicts the canonical index (Python
+  logs and ignores it), deduplicates controller records by signing key, and
+  retains a replaced branch's verified blocks as orphans (Python discards
+  them). None of this changes the wire rules or block validity; it only
+  removes guessing and re-fetch delays on the Go node.
+
+

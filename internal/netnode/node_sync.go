@@ -484,9 +484,34 @@ func (n *Node) fetchBlock(ctx context.Context, peer map[string]any, blockHash st
 	return accepted, false
 }
 
+// dedupeControllers collapses controller records that describe the same
+// signing key (or, without one, the same peer label) so a repeated or
+// multi-address record cannot count twice towards the approval quorum.
+func dedupeControllers(controllers []map[string]any) []map[string]any {
+	unique := make([]map[string]any, 0, len(controllers))
+	seen := map[string]struct{}{}
+	for _, controller := range controllers {
+		if controller == nil {
+			continue
+		}
+		key, _ := controller["public_key"].(string)
+		if key == "" {
+			key = "peer:" + PeerLabel(controller)
+		}
+		if _, duplicate := seen[key]; duplicate {
+			log.Printf("Ignoring duplicate controller %s", key)
+			continue
+		}
+		seen[key] = struct{}{}
+		unique = append(unique, controller)
+	}
+	return unique
+}
+
 // sendToControllers requests approvals from the controller set and gossips the
 // block when a 2/3 majority approves.
 func (n *Node) sendToControllers(ctx context.Context, controllers []map[string]any, block *ledger.Block) bool {
+	controllers = dedupeControllers(controllers)
 	if len(controllers) == 0 {
 		log.Printf("No controller nodes; accepting block %d locally", block.Index)
 		return true

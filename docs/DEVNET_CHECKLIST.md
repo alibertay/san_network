@@ -24,10 +24,10 @@ must be resolved before announcing the devnet.
 - [ ] 10-node test with independent data directories and ports
 - [ ] Partition scenarios A-D automated (5/5, 7/3, proposer isolation, full split)
 - [ ] Long-running soak test (`cmd/sansoak`) passes for the agreed duration
-- [ ] Fork-choice torture suite (randomized branches, delayed parents)
+- [x] Fork-choice torture suite (randomized branches, delayed parents)
 - [ ] Crash-consistency tests (kill during commit/finality/prune) pass
-- [ ] Validator churn suite (join, undelegate, withdraw, slash) passes
-- [ ] Finality stress suite (out-of-order, duplicate, conflicting votes) passes
+- [x] Validator churn suite (join, undelegate, withdraw, slash) passes
+- [x] Finality stress suite (out-of-order, duplicate, conflicting votes) passes
 - [ ] Mixed Go/Python implementation policy documented and enforced in code
 
 ## Persistence and recovery
@@ -113,7 +113,15 @@ until the corresponding work lands.
   a network-level attacker could serve a different genesis to a joining node.
 - **Mixed-implementation policy.** Python remains the reference and fixture
   source; the Go node is the canonical protocol implementation. Live Go/Python
-  interoperability is not continuously tested.
+  interoperability is not continuously tested. Three Go-only hardenings differ
+  from the Python reference without changing wire rules or block validity: a
+  persisted finality checkpoint that contradicts the canonical chain is a
+  fatal startup error instead of a logged ignore, controller records are
+  deduplicated by signing key before the approval count, and a replaced
+  branch's verified blocks are retained as orphans so a longer branch
+  descending from them does not wait for a re-fetch. Regression tests:
+  `TestPersistedFinalityContradictionFailsStartup`, `TestDedupeControllers`,
+  `TestReorgRetainsAbandonedBranchAncestors`.
 - **External security audit has not been performed.** The published review is an
   internal, automated/adversarial code review (`docs/security-review.md`).
 

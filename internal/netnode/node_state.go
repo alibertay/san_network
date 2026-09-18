@@ -206,19 +206,11 @@ func (n *Node) loadPersistedState(store *ledger.ChainStore) error {
 	if err := n.requireLoadedStateRoots(chain); err != nil {
 		return err
 	}
-	n.loadFinalityState(store)
-	if hasFinalizedHeight && storedFinalizedHash != "" {
-		height, _ := strconv.ParseInt(storedFinalizedHeight, 10, 64)
-		block := n.blockAt(height)
-		if block != nil && block.CurrentBlockHash == storedFinalizedHash {
-			// Finality only ever moves forward.
-			if height > n.finalizedHeight {
-				n.finalizedHeight = height
-				n.finalizedHash = storedFinalizedHash
-			}
-		} else {
-			log.Printf("Persisted finality checkpoint does not match the chain; ignoring")
-		}
+	if err := n.loadFinalityState(store); err != nil {
+		return err
+	}
+	if err := n.adoptPersistedFinality(store, storedFinalizedHeight, hasFinalizedHeight, storedFinalizedHash); err != nil {
+		return err
 	}
 
 	tipBlock := n.blockAt(n.blockchain.Tip().Index)
@@ -248,19 +240,17 @@ func (n *Node) requireLoadedStateRoots(chain []*ledger.Block) error {
 	return nil
 }
 
-func (n *Node) loadFinalityState(store *ledger.ChainStore) bool {
+func (n *Node) loadFinalityState(store *ledger.ChainStore) error {
 	raw, ok := store.GetMeta("finality_state")
 	if !ok || raw == "" {
-		return false
+		return nil
 	}
 	var state map[string]any
 	if err := json.Unmarshal([]byte(raw), &state); err != nil {
-		log.Printf("Ignoring unreadable persisted finality state: %v", err)
-		return false
+		return fmt.Errorf("Persisted finality state is unreadable (%v); refusing to start", err)
 	}
 	if state == nil {
-		log.Printf("Ignoring unreadable persisted finality state")
-		return false
+		return nil
 	}
 	if sets, ok := state["sets"].(map[string]any); ok {
 		n.finalitySets = map[int64]map[string]int64{}
@@ -284,14 +274,50 @@ func (n *Node) loadFinalityState(store *ledger.ChainStore) bool {
 	}
 	heightValue := int64Value(state["finalized_height"])
 	blockHash, _ := state["finalized_hash"].(string)
-	if heightValue > n.finalizedHeight && blockHash != "" {
-		block := n.blockAt(heightValue)
-		if block != nil && block.CurrentBlockHash == blockHash {
+	if heightValue > 0 && blockHash != "" {
+		canonicalHash, present := store.BlockHashAt(heightValue)
+		if !present || canonicalHash != blockHash {
+			return fmt.Errorf(
+				"Persisted finality state checkpoint at height %d refers to %s but the canonical chain has %q; refusing to start",
+				heightValue, blockHash, canonicalHash)
+		}
+		if heightValue > n.finalizedHeight {
 			n.finalizedHeight = heightValue
 			n.finalizedHash = blockHash
 		}
 	}
-	return true
+	return nil
+}
+
+// adoptPersistedFinality validates the checkpoint metadata against the
+// canonical block index. Pruning never removes the block at the finalized
+// height, so a missing or mismatching block means the persisted finality
+// contradicts the chain: refuse to start instead of guessing which history is
+// real (finality is monotone and can never be rolled back).
+func (n *Node) adoptPersistedFinality(store *ledger.ChainStore, storedHeight string, hasHeight bool, storedHash string) error {
+	if !hasHeight || storedHash == "" {
+		return nil
+	}
+	height, err := strconv.ParseInt(storedHeight, 10, 64)
+	if err != nil || height < 0 {
+		return fmt.Errorf("Persisted finality checkpoint has an invalid height %q; refusing to start", storedHeight)
+	}
+	canonicalHash, present := store.BlockHashAt(height)
+	if !present {
+		return fmt.Errorf(
+			"Persisted finality checkpoint at height %d is missing from the canonical chain; refusing to start", height)
+	}
+	if canonicalHash != storedHash {
+		return fmt.Errorf(
+			"Persisted finality checkpoint at height %d refers to %s but the canonical chain has %s; refusing to start",
+			height, storedHash, canonicalHash)
+	}
+	// Finality only ever moves forward.
+	if height > n.finalizedHeight {
+		n.finalizedHeight = height
+		n.finalizedHash = storedHash
+	}
+	return nil
 }
 
 func decodeFinalityVotes(raw any) map[string]map[string]map[string]any {

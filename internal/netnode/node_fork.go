@@ -2,6 +2,7 @@ package netnode
 
 import (
 	"log"
+	"sort"
 
 	"github.com/alibertay/san_network/internal/ledger"
 )
@@ -28,12 +29,24 @@ func (n *Node) verifyForkBlock(block *ledger.Block) bool {
 	return true
 }
 
+// sortedOrphanHashes returns the buffered orphan hashes in lexicographic
+// order so every map-driven fork decision is reproducible across runs.
+func (n *Node) sortedOrphanHashes() []string {
+	hashes := make([]string, 0, len(n.orphans))
+	for blockHash := range n.orphans {
+		hashes = append(hashes, blockHash)
+	}
+	sort.Strings(hashes)
+	return hashes
+}
+
 func (n *Node) bufferOrphan(block *ledger.Block) {
 	n.orphans[block.CurrentBlockHash] = block
 	for len(n.orphans) > n.config.MaxOrphans {
 		var oldest *ledger.Block
 		for _, candidate := range n.orphans {
-			if oldest == nil || candidate.Index < oldest.Index {
+			if oldest == nil || candidate.Index < oldest.Index ||
+				(candidate.Index == oldest.Index && candidate.CurrentBlockHash < oldest.CurrentBlockHash) {
 				oldest = candidate
 			}
 		}
@@ -54,7 +67,11 @@ func (n *Node) connectOrphans() int {
 	progressed := true
 	for progressed {
 		progressed = false
-		for blockHash, block := range n.orphans {
+		for _, blockHash := range n.sortedOrphanHashes() {
+			block, present := n.orphans[blockHash]
+			if !present {
+				continue
+			}
 			if block.PreviousBlockHash != n.blockchain.Tip().CurrentBlockHash {
 				continue
 			}
@@ -146,7 +163,8 @@ func (n *Node) bestOrphanChain() []*ledger.Block {
 	}
 	var best []*ledger.Block
 
-	for _, orphan := range n.orphans {
+	for _, orphanHash := range n.sortedOrphanHashes() {
+		orphan := n.orphans[orphanHash]
 		branch := []*ledger.Block{orphan}
 		cursor := orphan
 		seen := map[string]struct{}{orphan.CurrentBlockHash: {}}
@@ -158,7 +176,9 @@ func (n *Node) bestOrphanChain() []*ledger.Block {
 				for i := len(branch) - 1; i >= 0; i-- {
 					candidate = append(candidate, branch[i])
 				}
-				if best == nil || len(candidate) > len(best) {
+				if best == nil || len(candidate) > len(best) ||
+					(len(candidate) == len(best) &&
+						candidate[len(candidate)-1].CurrentBlockHash < best[len(best)-1].CurrentBlockHash) {
 					best = candidate
 				}
 				break
@@ -221,13 +241,16 @@ func (n *Node) tryReorg() bool {
 		return false
 	}
 
-	// Finalized history can never be rewritten.
+	// Finalized history can never be rewritten. The candidate may start at a
+	// pruned snapshot height, so the finalized checkpoint is addressed by its
+	// absolute block height, never by a slice index.
 	if n.finalizedHeight > 0 {
-		if int64(len(candidate)) <= n.finalizedHeight {
+		offset := n.finalizedHeight - candidate[0].Index
+		if offset < 0 || offset >= int64(len(candidate)) {
 			log.Printf("Rejected reorg shorter than finalized history")
 			return false
 		}
-		if candidate[n.finalizedHeight].CurrentBlockHash != n.finalizedHash {
+		if candidate[offset].CurrentBlockHash != n.finalizedHash {
 			log.Printf("Rejected reorg that would rewrite finalized history")
 			return false
 		}
@@ -248,10 +271,20 @@ func (n *Node) tryReorg() bool {
 		_, _ = n.store.DeleteMismatchedSnapshots(n.canonicalHashAt)
 	}
 	n.persistFinality()
-	for blockHash := range n.orphans {
+	for _, blockHash := range n.sortedOrphanHashes() {
 		if _, onChain := n.chainHashes[blockHash]; onChain {
 			delete(n.orphans, blockHash)
 		}
+	}
+	// Retain the replaced branch's blocks as orphans (they were fully verified
+	// before they became canonical) so a later, longer branch descending from
+	// them can be assembled instead of being unreachable until re-fetched.
+	// The orphan buffer stays bounded by max_orphans.
+	for _, block := range oldChain {
+		if _, onChain := n.chainHashes[block.CurrentBlockHash]; onChain {
+			continue
+		}
+		n.bufferOrphan(block)
 	}
 	log.Printf("Reorg: switched to a %d-block chain (tip index %d, hash %s)",
 		len(candidate), n.blockchain.Tip().Index, n.blockchain.Tip().CurrentBlockHash)
